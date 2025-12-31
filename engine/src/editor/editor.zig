@@ -295,10 +295,11 @@ pub const EditorSystem = struct {
 
             const imgui_wants_mouse = imgui.ImGuiSystem.wantsCaptureMouse();
             const gizmo_active = gizmo.is_active;
-            logger.debug("[PICKING] ImGui wants mouse: {}, Gizmo active: {}", .{ imgui_wants_mouse, gizmo_active });
+            const gizmo_hovered = (gizmo.hovered_axis != gizmo_mod.Axis.none);
+            logger.debug("[PICKING] ImGui wants mouse: {}, Gizmo active: {}, Gizmo hovered: {}", .{ imgui_wants_mouse, gizmo_active, gizmo_hovered });
 
-            // Don't pick if ImGui wants the mouse or gizmo is being manipulated
-            if (!imgui_wants_mouse and !gizmo_active) {
+            // Don't pick if ImGui wants the mouse or gizmo is being manipulated or hovered
+            if (!imgui_wants_mouse and !gizmo_active and !gizmo_hovered) {
                 // Get mouse position
                 const mouse = input.getMousePosition();
                 const mx = @as(f32, @floatCast(mouse.x));
@@ -367,6 +368,7 @@ pub const EditorSystem = struct {
             if (scene.getObject(selected_id)) |obj| {
                 // Set gizmo target from object transform
                 gizmo.setTarget(obj.transform.position, obj.transform.rotation, obj.transform.scale);
+                gizmo.is_visible = true;
 
                 // Set up view-projection for world-space rendering
                 if (renderer.getSystem()) |render_sys| {
@@ -380,9 +382,11 @@ pub const EditorSystem = struct {
                 }
             } else {
                 logger.warn("[GIZMO] Selected object {d} not found in scene", .{selected_id});
+                gizmo.is_visible = false;
             }
         } else {
-            // No selection - disable world position mode
+            // No selection - disable gizmo
+            gizmo.is_visible = false;
             gizmo.use_world_position = false;
         }
     }
@@ -410,8 +414,6 @@ pub const EditorSystem = struct {
 
                 // Update bounds
                 scene.updateBounds(obj);
-
-                logger.debug("[GIZMO] Applied delta - Pos: {d:.2},{d:.2},{d:.2}", .{ delta.position[0], delta.position[1], delta.position[2] });
             }
         }
     }

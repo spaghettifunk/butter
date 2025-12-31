@@ -91,12 +91,9 @@ fn onEvent(code: u16, sender: ?*anyopaque, listener: ?*anyopaque, data: event.Ev
 
     const code_enum: event.SystemEventCode = @enumFromInt(code);
     switch (code_enum) {
-        .application_quit => {
-            logger.info("EVENT_CODE_APPLICATION_QUIT recieved, shutting down.\n", .{});
-            appState.isRunning = false;
-            return true;
+        else => {
+            return false;
         },
-        else => {},
     }
     return false;
 }

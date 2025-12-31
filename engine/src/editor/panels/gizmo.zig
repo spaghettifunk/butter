@@ -358,9 +358,40 @@ pub const Gizmo = struct {
 
     /// Check which axis is being hovered.
     fn checkAxisHover(self: *Gizmo, mx: f32, my: f32, cx: f32, cy: f32, length: f32) Axis {
-        _ = self;
         const threshold: f32 = 15;
 
+        if (self.mode == .rotate) {
+            const radius = length * 0.8;
+            const dx = mx - cx;
+            const dy = my - cy;
+
+            // Check Z axis (Tall Ellipse: rx=r*0.3, ry=r) - High priority (inner)
+            {
+                const rx = radius * 0.3;
+                const ry = radius;
+                const d = @sqrt((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry));
+                // Approximate pixel distance check: normalized dist * min_radius
+                if (@abs(d - 1.0) * rx < threshold) return .z;
+            }
+
+            // Check Y axis (Wide Ellipse: rx=r, ry=r*0.3)
+            {
+                const rx = radius;
+                const ry = radius * 0.3;
+                const d = @sqrt((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry));
+                if (@abs(d - 1.0) * ry < threshold) return .y;
+            }
+
+            // Check X axis (Circle: r=radius) - Lowest priority (outer)
+            {
+                const dist = @sqrt(dx * dx + dy * dy);
+                if (@abs(dist - radius) < threshold) return .x;
+            }
+
+            return .none;
+        }
+
+        // Translate / Scale logic
         // Check X axis
         if (my >= cy - threshold and my <= cy + threshold and mx >= cx and mx <= cx + length + threshold) {
             return .x;
