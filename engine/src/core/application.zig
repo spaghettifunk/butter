@@ -163,6 +163,12 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
     appState.width = appState.gameInstance.appConfig.startWidth;
     appState.height = appState.gameInstance.appConfig.startHeight;
 
+    // Initialize logging subsystem
+    if (!logger.LoggingSystem.initialize("logs.txt")) {
+        logger.fatal("Failed to initialize logging subsystem.", .{});
+        return false;
+    }
+
     // Initialize input subsystem
     if (!input.InputSystem.initialize()) {
         logger.fatal("Failed to initialize input subsystem.", .{});

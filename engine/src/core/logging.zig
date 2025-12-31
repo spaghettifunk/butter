@@ -19,34 +19,93 @@ const warn_prefix = Color.yellow ++ "[WARN]  ";
 const err_prefix = Color.red ++ "[ERROR]  ";
 const fatal_prefix = Color.bold_red ++ "[FATAL]  ";
 
-const stderr = std.fs.File.stderr();
+const context = @import("../context.zig");
+var instance: LoggingSystem = undefined;
 
-fn write(comptime prefix: []const u8, comptime format: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, prefix ++ format ++ "\n", args) catch return;
-    stderr.writeAll(msg) catch {};
+pub const LoggingSystem = struct {
+    stderr: std.fs.File = std.fs.File.stderr(),
+    log_file: ?std.fs.File = null,
+    log_file_mutex: std.Thread.Mutex = .{},
+
+    pub fn initialize(path: []const u8) bool {
+        // already initialized
+        if (instance.log_file != null) {
+            return false;
+        }
+
+        const file = std.fs.cwd().createFile(path, .{
+            .read = false,
+            .truncate = false,
+            .mode = 0o644,
+        }) catch return false;
+
+        instance = LoggingSystem{
+            .log_file = file,
+            .log_file_mutex = std.Thread.Mutex{},
+        };
+        context.get().logging = &instance;
+
+        instance.write(info_prefix, "Logging initialized.", .{});
+
+        return true;
+    }
+
+    pub fn shutdown() void {
+        if (instance.log_file) |f| {
+            f.close();
+            instance.log_file = null;
+        }
+
+        context.get().logging = null;
+
+        instance.write(info_prefix, "Logging shutdown.", .{});
+    }
+
+    fn write(self: *LoggingSystem, comptime prefix: []const u8, comptime format: []const u8, args: anytype) void {
+        var buf: [4096]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, prefix ++ format ++ "\n", args) catch return;
+        self.stderr.writeAll(msg) catch {};
+
+        // Optional file
+        self.log_file_mutex.lock();
+        defer self.log_file_mutex.unlock();
+
+        if (self.log_file) |f| {
+            f.writeAll(msg) catch {};
+        }
+    }
+};
+
+pub fn getSystem() ?*LoggingSystem {
+    return context.get().logging;
 }
 
 pub fn trace(comptime format: []const u8, args: anytype) void {
-    write(trace_prefix, format, args);
+    const sys = getSystem() orelse return;
+    sys.write(trace_prefix, format, args);
 }
 
 pub fn debug(comptime format: []const u8, args: anytype) void {
-    write(debug_prefix, format, args);
+    const sys = getSystem() orelse return;
+    sys.write(debug_prefix, format, args);
 }
 
 pub fn info(comptime format: []const u8, args: anytype) void {
-    write(info_prefix, format, args);
+    const sys = getSystem() orelse return;
+    sys.write(info_prefix, format, args);
 }
 
 pub fn warn(comptime format: []const u8, args: anytype) void {
-    write(warn_prefix, format, args);
+    const sys = getSystem() orelse return;
+    sys.write(warn_prefix, format, args);
 }
 
 pub fn err(comptime format: []const u8, args: anytype) void {
-    write(err_prefix, format, args);
+    const sys = getSystem() orelse return;
+    sys.write(err_prefix, format, args);
 }
 
 pub fn fatal(comptime format: []const u8, args: anytype) void {
-    write(fatal_prefix, format, args);
+    const sys = getSystem() orelse return;
+    sys.write(fatal_prefix, format, args);
 }

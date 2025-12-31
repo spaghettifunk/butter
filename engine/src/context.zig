@@ -14,6 +14,7 @@ const std = @import("std");
 const memory = @import("systems/memory.zig");
 const event = @import("systems/event.zig");
 const input = @import("systems/input.zig");
+const logging = @import("core/logging.zig");
 const texture = @import("systems/texture.zig");
 const material = @import("systems/material.zig");
 const geometry = @import("systems/geometry.zig");
@@ -27,6 +28,7 @@ const EditorScene = @import("editor/editor_scene.zig").EditorScene;
 /// This is an extern struct to allow cross-library sharing via extern var
 pub const EngineContext = extern struct {
     memory: ?*memory.MemorySystem,
+    logging: ?*logging.LoggingSystem,
     event: ?*event.EventSystem,
     input: ?*input.InputSystem,
     texture: ?*texture.TextureSystem,
@@ -44,6 +46,7 @@ pub const EngineContext = extern struct {
 // The actual storage - lives in the executable
 var contextStorage: EngineContext = .{
     .memory = null,
+    .logging = null,
     .event = null,
     .input = null,
     .texture = null,
