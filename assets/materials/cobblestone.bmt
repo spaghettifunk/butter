@@ -1,0 +1,5 @@
+# Cobblestone material
+name=cobblestone
+diffuse_colour=1.0,1.0,1.0,1.0
+diffuse_map=../assets/textures/cobblestone.png
+auto_release=true

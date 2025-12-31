@@ -1,0 +1,55 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct GlobalUBO
+{
+    float4x4 projection;
+    float4x4 view;
+    float4x4 light_space_matrix;
+    float4x4 shadow_projection;
+    packed_float3 camera_position;
+    float _pad0;
+    packed_float3 light_direction;
+    float light_intensity;
+    packed_float3 light_color;
+    float shadow_map_size;
+    float2 screen_size;
+    float near_plane;
+    float far_plane;
+    float time;
+    float delta_time;
+    uint frame_count;
+    float _pad1;
+    float4 ambient_color;
+};
+
+struct PushConstants
+{
+    float4x4 model;
+};
+
+struct main0_out
+{
+    float3 frag_color [[user(locn0)]];
+    float2 frag_texcoord [[user(locn1)]];
+    float4 gl_Position [[position]];
+};
+
+struct main0_in
+{
+    float3 in_position [[attribute(0)]];
+    float3 in_color [[attribute(1)]];
+    float2 in_texcoord [[attribute(2)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buffer(0)]], constant PushConstants& push [[buffer(1)]])
+{
+    main0_out out = {};
+    out.gl_Position = ((ubo.projection * ubo.view) * push.model) * float4(in.in_position, 1.0);
+    out.frag_color = in.in_color;
+    out.frag_texcoord = in.in_texcoord;
+    return out;
+}
+
