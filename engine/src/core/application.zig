@@ -8,7 +8,9 @@ const input = @import("../systems/input.zig");
 const texture = @import("../systems/texture.zig");
 const material = @import("../systems/material.zig");
 const geometry = @import("../systems/geometry.zig");
+
 const clock = @import("clock.zig");
+
 const Game = @import("../game_types.zig").Game;
 const platform = @import("../platform/platform.zig");
 const renderer = @import("../renderer/renderer.zig");
@@ -193,7 +195,7 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
 
     // Initialize renderer subsystem
     // TODO: make backend type configurable
-    if (!renderer.RendererSystem.initialize(.vulkan, appState.gameInstance.appConfig.name)) {
+    if (!renderer.RendererSystem.initialize(.metal, appState.gameInstance.appConfig.name)) {
         logger.err("Failed to initialize renderer subsystem.", .{});
         return false;
     }
@@ -284,6 +286,7 @@ pub fn run() bool {
             }
 
             if (renderer.getSystem()) |sys| {
+
                 // Begin the frame (starts command buffer recording)
                 if (sys.beginFrame(delta_f32)) {
                     // Begin ImGui frame (must be after renderer beginFrame) - only in editor mode
@@ -371,7 +374,9 @@ pub fn run() bool {
     }
     render_graph.RenderGraphSystem.shutdown();
     geometry.GeometrySystem.shutdown();
+
     material.MaterialSystem.shutdown();
+
     texture.TextureSystem.shutdown();
     renderer.RendererSystem.shutdown();
     event.EventSystem.shutdown();

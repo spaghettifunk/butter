@@ -109,21 +109,19 @@ pub const CommandPalette = struct {
             const input_flags = imgui.InputTextFlags.EnterReturnsTrue |
                 imgui.InputTextFlags.AutoSelectAll;
 
-            const enter_pressed = c.ImGui_InputTextWithHintEx(
+            const content_changed = imgui.inputTextWithHint(
                 "##search",
                 "Type to search commands...",
                 &self.search_buffer,
                 self.search_buffer.len,
                 input_flags,
-                null,
-                null,
             );
 
             imgui.popItemWidth();
 
-            // Handle Enter key
-            if (enter_pressed) {
-                if (self.selected_index < self.filtered_commands.items.len) {
+            // Handle Enter key - use explicit check to avoid premature execution on every change
+            if (content_changed and imgui.isKeyPressed(.enter)) {
+                if (self.filtered_commands.items.len > 0 and self.selected_index < self.filtered_commands.items.len) {
                     executed_command = self.filtered_commands.items[self.selected_index].command.id;
                     self.close();
                 }
@@ -135,18 +133,18 @@ pub const CommandPalette = struct {
             // Filter commands based on search
             self.filterCommands(registry);
 
-            // Handle keyboard navigation using ImGui's key state (works correctly with input focus)
-            if (c.ImGui_IsKeyPressedEx(c.ImGuiKey_UpArrow, false)) {
+            // Handle keyboard navigation using ImGui keys
+            if (imgui.isKeyPressed(.up_arrow)) {
                 if (self.selected_index > 0) {
                     self.selected_index -= 1;
                 }
             }
-            if (c.ImGui_IsKeyPressedEx(c.ImGuiKey_DownArrow, false)) {
+            if (imgui.isKeyPressed(.down_arrow)) {
                 if (self.selected_index + 1 < self.filtered_commands.items.len) {
                     self.selected_index += 1;
                 }
             }
-            if (c.ImGui_IsKeyPressedEx(c.ImGuiKey_Escape, false)) {
+            if (imgui.isKeyPressed(.escape)) {
                 self.close();
             }
 

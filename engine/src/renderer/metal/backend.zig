@@ -322,8 +322,10 @@ pub const MetalBackend = struct {
         // Bind global uniform buffer (data is uploaded via updateUBO from renderer system)
         const frame_idx = self.context.frame_index;
         if (self.global_uniform_buffers[frame_idx].handle) |ubo| {
-            // setVertexBuffer:offset:atIndex: - UBO at buffer index 0
-            _ = msg3(void, encoder, sel("setVertexBuffer:offset:atIndex:"), ubo, @as(u64, 0), @as(u64, 0));
+            // setVertexBuffer:offset:atIndex: - UBO at buffer index 1 (matching Vertex MSL [[buffer(1)]])
+            _ = msg3(void, encoder, sel("setVertexBuffer:offset:atIndex:"), ubo, @as(u64, 0), @as(u64, 1));
+            // setFragmentBuffer:offset:atIndex: - UBO at buffer index 0 (matching Fragment MSL [[buffer(0)]])
+            _ = msg3(void, encoder, sel("setFragmentBuffer:offset:atIndex:"), ubo, @as(u64, 0), @as(u64, 0));
         }
 
         return true;

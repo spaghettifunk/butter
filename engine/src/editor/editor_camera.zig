@@ -64,46 +64,48 @@ pub const EditorCamera = struct {
             self.updateVectors();
         }
 
-        // WASD movement
-        const camera_speed = self.move_speed * delta_time * (if (input.isKeyDown(.left_shift)) self.fast_move_multiplier else 1.0);
+        // WASD movement - only while right-click held (is_looking)
+        if (self.is_looking) {
+            const camera_speed = self.move_speed * delta_time * (if (input.isKeyDown(.left_shift)) self.fast_move_multiplier else 1.0);
 
-        if (input.isKeyDown(.w)) {
-            // Move forward (in direction camera is looking)
-            self.position[0] += self.front[0] * camera_speed;
-            self.position[1] += self.front[1] * camera_speed;
-            self.position[2] += self.front[2] * camera_speed;
-            self.view_matrix_dirty = true;
-        }
-        if (input.isKeyDown(.s)) {
-            // Move backward
-            self.position[0] -= self.front[0] * camera_speed;
-            self.position[1] -= self.front[1] * camera_speed;
-            self.position[2] -= self.front[2] * camera_speed;
-            self.view_matrix_dirty = true;
-        }
-        if (input.isKeyDown(.a)) {
-            // Strafe left
-            self.position[0] -= self.right[0] * camera_speed;
-            self.position[1] -= self.right[1] * camera_speed;
-            self.position[2] -= self.right[2] * camera_speed;
-            self.view_matrix_dirty = true;
-        }
-        if (input.isKeyDown(.d)) {
-            // Strafe right
-            self.position[0] += self.right[0] * camera_speed;
-            self.position[1] += self.right[1] * camera_speed;
-            self.position[2] += self.right[2] * camera_speed;
-            self.view_matrix_dirty = true;
-        }
-        if (input.isKeyDown(.e)) {
-            // Move up (world space)
-            self.position[1] += camera_speed;
-            self.view_matrix_dirty = true;
-        }
-        if (input.isKeyDown(.q)) {
-            // Move down (world space)
-            self.position[1] -= camera_speed;
-            self.view_matrix_dirty = true;
+            if (input.isKeyDown(.w)) {
+                // Move forward (in direction camera is looking)
+                self.position[0] += self.front[0] * camera_speed;
+                self.position[1] += self.front[1] * camera_speed;
+                self.position[2] += self.front[2] * camera_speed;
+                self.view_matrix_dirty = true;
+            }
+            if (input.isKeyDown(.s)) {
+                // Move backward
+                self.position[0] -= self.front[0] * camera_speed;
+                self.position[1] -= self.front[1] * camera_speed;
+                self.position[2] -= self.front[2] * camera_speed;
+                self.view_matrix_dirty = true;
+            }
+            if (input.isKeyDown(.a)) {
+                // Strafe left
+                self.position[0] -= self.right[0] * camera_speed;
+                self.position[1] -= self.right[1] * camera_speed;
+                self.position[2] -= self.right[2] * camera_speed;
+                self.view_matrix_dirty = true;
+            }
+            if (input.isKeyDown(.d)) {
+                // Strafe right
+                self.position[0] += self.right[0] * camera_speed;
+                self.position[1] += self.right[1] * camera_speed;
+                self.position[2] += self.right[2] * camera_speed;
+                self.view_matrix_dirty = true;
+            }
+            if (input.isKeyDown(.e)) {
+                // Move up (world space)
+                self.position[1] += camera_speed;
+                self.view_matrix_dirty = true;
+            }
+            if (input.isKeyDown(.q)) {
+                // Move down (world space)
+                self.position[1] -= camera_speed;
+                self.view_matrix_dirty = true;
+            }
         }
     }
 

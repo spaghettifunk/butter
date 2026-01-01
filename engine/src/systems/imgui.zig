@@ -417,6 +417,63 @@ pub const InputTextFlags = struct {
     pub const EscapeClearsAll: c_int = 1 << 20;
 };
 
+pub const Key = enum(c_int) {
+    none = 0,
+    tab = 512,
+    left_arrow = 513,
+    right_arrow = 514,
+    up_arrow = 515,
+    down_arrow = 516,
+    page_up = 517,
+    page_down = 518,
+    home = 519,
+    end = 520,
+    insert = 521,
+    delete = 522,
+    backspace = 523,
+    space = 524,
+    enter = 525,
+    escape = 526,
+    left_ctrl = 527,
+    left_shift = 528,
+    left_alt = 529,
+    left_super = 530,
+    right_ctrl = 531,
+    right_shift = 532,
+    right_alt = 533,
+    right_super = 534,
+};
+
+pub const MouseButton = enum(c_int) {
+    left = 0,
+    right = 1,
+    middle = 2,
+};
+
+pub fn isKeyPressed(key: Key) bool {
+    return c.ImGui_IsKeyPressed(@intFromEnum(key));
+}
+
+pub fn isKeyPressedEx(key: Key, repeat: bool) bool {
+    return c.ImGui_IsKeyPressedEx(@intFromEnum(key), repeat);
+}
+
+pub fn isKeyReleased(key: Key) bool {
+    return c.ImGui_IsKeyReleased(@intFromEnum(key));
+}
+
+pub fn isItemActive() bool {
+    return c.ImGui_IsItemActive();
+}
+
+pub fn isItemDeactivatedAfterEdit() bool {
+    return c.ImGui_IsItemDeactivatedAfterEdit();
+}
+
+pub fn isMouseClicked(button_idx: MouseButton) bool {
+    return c.ImGui_IsMouseClicked(@intFromEnum(button_idx), false);
+}
+
 /// Push item width
 pub fn pushItemWidth(item_width: f32) void {
     c.ImGui_PushItemWidth(item_width);

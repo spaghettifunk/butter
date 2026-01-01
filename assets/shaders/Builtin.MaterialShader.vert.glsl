@@ -42,14 +42,26 @@ layout(push_constant) uniform PushConstants {
 } push;
 
 layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_color;
+layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_texcoord;
+layout(location = 3) in vec4 in_tangent;
+layout(location = 4) in vec4 in_color;
 
-layout(location = 0) out vec3 frag_color;
+layout(location = 0) out vec4 frag_color;
 layout(location = 1) out vec2 frag_texcoord;
+layout(location = 2) out vec3 frag_normal;
+layout(location = 3) out vec3 frag_pos;
 
 void main() {
-    gl_Position = ubo.projection * ubo.view * push.model * vec4(in_position, 1.0);
+    vec4 world_pos = push.model * vec4(in_position, 1.0);
+    gl_Position = ubo.projection * ubo.view * world_pos;
+    
+    frag_pos = vec3(world_pos);
+    
+    // Transform normal to world space (using mat3 of model matrix since we assume uniform scaling)
+    // For non-uniform scaling, we should use inverse(transpose(mat3(model)))
+    frag_normal = normalize(mat3(push.model) * in_normal);
+    
     frag_color = in_color;
     frag_texcoord = in_texcoord;
 }

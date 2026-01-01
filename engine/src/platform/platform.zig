@@ -66,6 +66,13 @@ fn scrollCallback(window: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.
     }
 }
 
+fn charCallback(window: ?*c.GLFWwindow, codepoint: u32) callconv(.c) void {
+    // Forward to ImGui (if enabled)
+    if (build_options.enable_imgui) {
+        imgui_glfw.cImGui_ImplGlfw_CharCallback(@ptrCast(window), codepoint);
+    }
+}
+
 fn framebufferSizeCallback(_: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.c) void {
     var ctx = std.mem.zeroes(event.EventContext);
     ctx.u16[0] = @intCast(@max(0, width));
@@ -100,6 +107,7 @@ pub fn startup(
     _ = c.glfwSetMouseButtonCallback(window, mouseButtonCallback);
     _ = c.glfwSetCursorPosCallback(window, cursorPosCallback);
     _ = c.glfwSetScrollCallback(window, scrollCallback);
+    _ = c.glfwSetCharCallback(window, charCallback);
     _ = c.glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
 
     _ = c.glfwSetWindowPos(window, x, y);

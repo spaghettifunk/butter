@@ -38,7 +38,7 @@ pub fn createGlobalLayout(
             .binding = 0,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
-            .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT,
+            .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = null,
         },
         // Texture sampler binding: set 0, binding 1

@@ -48,8 +48,8 @@ pub fn getVertexBindingDescription() vk.VkVertexInputBindingDescription {
     };
 }
 
-/// Get vertex attribute descriptions for Vertex3D (position + color + texcoord)
-pub fn getVertexAttributeDescriptions() [3]vk.VkVertexInputAttributeDescription {
+/// Get vertex attribute descriptions for Vertex3D (position + normal + texcoord + tangent + color)
+pub fn getVertexAttributeDescriptions() [5]vk.VkVertexInputAttributeDescription {
     return .{
         // Position attribute (location 0)
         .{
@@ -58,12 +58,12 @@ pub fn getVertexAttributeDescriptions() [3]vk.VkVertexInputAttributeDescription 
             .format = vk.VK_FORMAT_R32G32B32_SFLOAT,
             .offset = @offsetOf(Vertex3D, "position"),
         },
-        // Color attribute (location 1)
+        // Normal attribute (location 1)
         .{
             .location = 1,
             .binding = 0,
             .format = vk.VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = @offsetOf(Vertex3D, "color"),
+            .offset = @offsetOf(Vertex3D, "normal"),
         },
         // Texture coordinate attribute (location 2)
         .{
@@ -71,6 +71,20 @@ pub fn getVertexAttributeDescriptions() [3]vk.VkVertexInputAttributeDescription 
             .binding = 0,
             .format = vk.VK_FORMAT_R32G32_SFLOAT,
             .offset = @offsetOf(Vertex3D, "texcoord"),
+        },
+        // Tangent attribute (location 3)
+        .{
+            .location = 3,
+            .binding = 0,
+            .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = @offsetOf(Vertex3D, "tangent"),
+        },
+        // Color attribute (location 4)
+        .{
+            .location = 4,
+            .binding = 0,
+            .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT, // Color is now vec4
+            .offset = @offsetOf(Vertex3D, "color"),
         },
     };
 }

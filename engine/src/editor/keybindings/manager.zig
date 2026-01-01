@@ -91,9 +91,16 @@ pub const KeybindingManager = struct {
     /// Process a key event and execute matching command.
     /// Returns true if a command was executed.
     pub fn processKeyEvent(self: *KeybindingManager, key: input.Key, mods: input.Mods) bool {
-        // Check if ImGui wants keyboard input, but allow command palette to override
-        if (imgui.ImGuiSystem.wantsCaptureKeyboard() and !self.context.command_palette_open) {
-            return false;
+        // If ImGui wants keyboard input, we generally block global keybindings.
+        if (imgui.ImGuiSystem.wantsCaptureKeyboard()) {
+            // EXCEPTION: Always allow Escape to pass through if the command palette is open,
+            // so it can be handled by the close_palette command.
+            if (key == .escape and self.context.command_palette_open) {
+                // Continue to process bindings
+            } else {
+                // For everything else, block keybindings while typing in ImGui fields
+                return false;
+            }
         }
 
         for (self.bindings.items) |binding| {
@@ -116,7 +123,9 @@ pub const KeybindingManager = struct {
     }
 
     /// Check if a condition string evaluates to true.
-    fn checkCondition(self: *KeybindingManager, condition: []const u8) bool {
+    fn checkCondition(self: *KeybindingManager, condition_raw: []const u8) bool {
+        const condition = std.mem.trim(u8, condition_raw, " \t\r\n");
+
         // Empty condition always passes
         if (condition.len == 0) {
             return true;
@@ -154,6 +163,8 @@ pub const KeybindingManager = struct {
         try self.bind(KeyCombo.ctrl(.m), "view.toggle_material_panel");
         try self.bind(KeyCombo.ctrl(.d), "view.toggle_debug_overlay");
         try self.bind(KeyCombo.ctrl(.g), "view.toggle_gizmo");
+        try self.bind(KeyCombo.ctrl(.l), "view.toggle_light_panel");
+        try self.bind(KeyCombo.ctrlShift(.g), "view.toggle_gizmo_panel");
 
         // Gizmo modes (only when gizmo is visible)
         try self.bindWhen(KeyCombo.noMod(.t), "gizmo.mode_translate", "gizmo_visible");

@@ -153,8 +153,8 @@ fn createVertexDescriptor() ?*anyopaque {
     if (attributes == null) return null;
 
     // Buffer indices:
-    // 0 = GlobalUBO (uniform buffer)
-    // 1 = PushConstants (model matrix)
+    // 0 = PushConstants (model matrix)
+    // 1 = GlobalUBO (uniform buffer)
     // 2 = Vertex data (from vertex descriptor)
     const VERTEX_BUFFER_INDEX: u64 = 2;
 
@@ -166,11 +166,11 @@ fn createVertexDescriptor() ?*anyopaque {
         _ = msg1(void, attr, sel("setBufferIndex:"), VERTEX_BUFFER_INDEX);
     }
 
-    // Attribute 1: color (float3) at offset 12
+    // Attribute 1: normal (float3) at offset 12
     const attr1 = msg1(?*anyopaque, attributes, sel("objectAtIndexedSubscript:"), @as(u64, 1));
     if (attr1) |attr| {
         _ = msg1(void, attr, sel("setFormat:"), metal_context.MTLVertexFormat.Float3);
-        _ = msg1(void, attr, sel("setOffset:"), @as(u64, 12)); // 3 * sizeof(float)
+        _ = msg1(void, attr, sel("setOffset:"), @as(u64, 12));
         _ = msg1(void, attr, sel("setBufferIndex:"), VERTEX_BUFFER_INDEX);
     }
 
@@ -178,7 +178,23 @@ fn createVertexDescriptor() ?*anyopaque {
     const attr2 = msg1(?*anyopaque, attributes, sel("objectAtIndexedSubscript:"), @as(u64, 2));
     if (attr2) |attr| {
         _ = msg1(void, attr, sel("setFormat:"), metal_context.MTLVertexFormat.Float2);
-        _ = msg1(void, attr, sel("setOffset:"), @as(u64, 24)); // 6 * sizeof(float)
+        _ = msg1(void, attr, sel("setOffset:"), @as(u64, 24));
+        _ = msg1(void, attr, sel("setBufferIndex:"), VERTEX_BUFFER_INDEX);
+    }
+
+    // Attribute 3: tangent (float4) at offset 32
+    const attr3 = msg1(?*anyopaque, attributes, sel("objectAtIndexedSubscript:"), @as(u64, 3));
+    if (attr3) |attr| {
+        _ = msg1(void, attr, sel("setFormat:"), metal_context.MTLVertexFormat.Float4);
+        _ = msg1(void, attr, sel("setOffset:"), @as(u64, 32));
+        _ = msg1(void, attr, sel("setBufferIndex:"), VERTEX_BUFFER_INDEX);
+    }
+
+    // Attribute 4: color (float4) at offset 48
+    const attr4 = msg1(?*anyopaque, attributes, sel("objectAtIndexedSubscript:"), @as(u64, 4));
+    if (attr4) |attr| {
+        _ = msg1(void, attr, sel("setFormat:"), metal_context.MTLVertexFormat.Float4);
+        _ = msg1(void, attr, sel("setOffset:"), @as(u64, 48));
         _ = msg1(void, attr, sel("setBufferIndex:"), VERTEX_BUFFER_INDEX);
     }
 
@@ -187,7 +203,7 @@ fn createVertexDescriptor() ?*anyopaque {
     if (layouts) |l| {
         const layout = msg1(?*anyopaque, l, sel("objectAtIndexedSubscript:"), VERTEX_BUFFER_INDEX);
         if (layout) |lay| {
-            // Stride = sizeof(Vertex3D) = 32 bytes (3+3+2 floats = 8 floats * 4)
+            // Stride = sizeof(Vertex3D) = 64 bytes
             _ = msg1(void, lay, sel("setStride:"), @as(u64, @sizeOf(Vertex3D)));
             _ = msg1(void, lay, sel("setStepFunction:"), metal_context.MTLVertexStepFunction.PerVertex);
             _ = msg1(void, lay, sel("setStepRate:"), @as(u64, 1));
@@ -247,7 +263,7 @@ pub fn bind(encoder: ?*anyopaque, pipeline: *const MetalPipeline) void {
 pub fn pushConstants(encoder: ?*anyopaque, push_constant: *const PushConstantObject) void {
     const enc = encoder orelse return;
 
-    // Set vertex bytes at buffer index 1 (matching MSL: [[buffer(1)]])
+    // Set vertex bytes at buffer index 0 (matching Vertex MSL: [[buffer(0)]])
     // Using setVertexBytes:length:atIndex:
     _ = msg3(
         void,
@@ -255,7 +271,7 @@ pub fn pushConstants(encoder: ?*anyopaque, push_constant: *const PushConstantObj
         sel("setVertexBytes:length:atIndex:"),
         push_constant,
         @as(u64, @sizeOf(PushConstantObject)),
-        @as(u64, 1), // Buffer index 1 for push constants
+        @as(u64, 0), // Buffer index 0 for push constants
     );
 }
 

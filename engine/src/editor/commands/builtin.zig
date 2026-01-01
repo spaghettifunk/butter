@@ -21,6 +21,8 @@ pub const EditorCallbacks = struct {
     gizmoModeRotate: ?*const fn () void = null,
     gizmoModeScale: ?*const fn () void = null,
     gizmoToggleSpace: ?*const fn () void = null,
+    toggleGizmoPanel: ?*const fn () void = null,
+    toggleLightPanel: ?*const fn () void = null,
 };
 
 var callbacks: EditorCallbacks = .{};
@@ -104,6 +106,22 @@ pub fn registerBuiltinCommands(registry: *CommandRegistry) !void {
         .description = "Show or hide the transform gizmo",
         .category = "View",
         .callback = cmdToggleGizmo,
+    });
+
+    try registry.register(.{
+        .id = "view.toggle_gizmo_panel",
+        .name = "Toggle Gizmo Panel",
+        .description = "Show or hide the gizmo transform panel",
+        .category = "View",
+        .callback = cmdToggleGizmoPanel,
+    });
+
+    try registry.register(.{
+        .id = "view.toggle_light_panel",
+        .name = "Toggle Light Panel",
+        .description = "Show or hide the light editor panel",
+        .category = "View",
+        .callback = cmdToggleLightPanel,
     });
 
     // Gizmo commands
@@ -194,4 +212,12 @@ fn cmdGizmoModeScale(_: ?*anyopaque) void {
 
 fn cmdGizmoToggleSpace(_: ?*anyopaque) void {
     if (callbacks.gizmoToggleSpace) |cb| cb();
+}
+
+fn cmdToggleGizmoPanel(_: ?*anyopaque) void {
+    if (callbacks.toggleGizmoPanel) |cb| cb();
+}
+
+fn cmdToggleLightPanel(_: ?*anyopaque) void {
+    if (callbacks.toggleLightPanel) |cb| cb();
 }

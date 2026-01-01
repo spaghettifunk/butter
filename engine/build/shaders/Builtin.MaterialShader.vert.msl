@@ -3,6 +3,11 @@
 
 using namespace metal;
 
+struct PushConstants
+{
+    float4x4 model;
+};
+
 struct GlobalUBO
 {
     float4x4 projection;
@@ -25,29 +30,30 @@ struct GlobalUBO
     float4 ambient_color;
 };
 
-struct PushConstants
-{
-    float4x4 model;
-};
-
 struct main0_out
 {
-    float3 frag_color [[user(locn0)]];
+    float4 frag_color [[user(locn0)]];
     float2 frag_texcoord [[user(locn1)]];
+    float3 frag_normal [[user(locn2)]];
+    float3 frag_pos [[user(locn3)]];
     float4 gl_Position [[position]];
 };
 
 struct main0_in
 {
     float3 in_position [[attribute(0)]];
-    float3 in_color [[attribute(1)]];
+    float3 in_normal [[attribute(1)]];
     float2 in_texcoord [[attribute(2)]];
+    float4 in_color [[attribute(4)]];
 };
 
-vertex main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buffer(0)]], constant PushConstants& push [[buffer(1)]])
+vertex main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[buffer(0)]], constant GlobalUBO& ubo [[buffer(1)]])
 {
     main0_out out = {};
-    out.gl_Position = ((ubo.projection * ubo.view) * push.model) * float4(in.in_position, 1.0);
+    float4 world_pos = push.model * float4(in.in_position, 1.0);
+    out.gl_Position = (ubo.projection * ubo.view) * world_pos;
+    out.frag_pos = float3(world_pos.xyz);
+    out.frag_normal = fast::normalize(float3x3(push.model[0].xyz, push.model[1].xyz, push.model[2].xyz) * in.in_normal);
     out.frag_color = in.in_color;
     out.frag_texcoord = in.in_texcoord;
     return out;

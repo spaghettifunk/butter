@@ -88,15 +88,9 @@ pub const Mat4 = extern union {
 };
 
 /// Vertex with position, color, and texture coordinates for rendering (32 bytes)
+/// Vertex with position, normal, texture coordinates, tangent, and color (64 bytes)
+/// Universal vertex format for the engine.
 pub const Vertex3D = extern struct {
-    position: [3]f32, // vec3 position
-    color: [3]f32, // vec3 color
-    texcoord: [2]f32, // vec2 texture coordinates
-};
-
-/// Extended vertex format for PBR and normal mapping (64 bytes)
-/// Used for: PBR materials, normal mapping, advanced lighting
-pub const Vertex3DExtended = extern struct {
     position: [3]f32, // 12 bytes - vec3 position
     normal: [3]f32, // 12 bytes - vec3 normal
     texcoord: [2]f32, // 8 bytes - vec2 texture coordinates
