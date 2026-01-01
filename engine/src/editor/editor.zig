@@ -40,6 +40,8 @@ const picking = @import("picking.zig");
 // Existing editor sub-modules
 pub const scene_editor = @import("scene_editor.zig");
 pub const property_inspector = @import("property_inspector.zig");
+pub const gizmo_panel = @import("panels/gizmo_panel.zig");
+pub const light_panel = @import("panels/light_panel.zig");
 pub const asset_browser = @import("asset_browser.zig");
 pub const console = @import("console.zig");
 
@@ -74,6 +76,8 @@ pub const EditorSystem = struct {
     var show_asset_browser: bool = false;
     var show_console: bool = false;
     var show_material_panel: bool = false;
+    var show_gizmo_panel: bool = false;
+    var show_light_panel: bool = false;
 
     pub fn initialize() bool {
         if (!imgui.ImGuiSystem.isInitialized()) {
@@ -101,6 +105,8 @@ pub const EditorSystem = struct {
             .gizmoModeRotate = gizmoModeRotate,
             .gizmoModeScale = gizmoModeScale,
             .gizmoToggleSpace = gizmoToggleSpace,
+            .toggleGizmoPanel = toggleGizmoPanel,
+            .toggleLightPanel = toggleLightPanel,
         });
 
         // Register built-in commands
@@ -147,6 +153,10 @@ pub const EditorSystem = struct {
         scene_editor.setContext(editor_scene_ptr.?, &selection);
         property_inspector.init();
         property_inspector.setContext(editor_scene_ptr.?, &selection);
+        gizmo_panel.init();
+        gizmo_panel.setContext(editor_scene_ptr.?, &selection);
+        light_panel.init();
+        light_panel.setContext(&selection);
         asset_browser.init();
         console.init();
 
@@ -181,6 +191,8 @@ pub const EditorSystem = struct {
 
         console.shutdown();
         asset_browser.shutdown();
+        light_panel.shutdown();
+        gizmo_panel.shutdown();
         property_inspector.shutdown();
         scene_editor.shutdown();
 
@@ -204,7 +216,7 @@ pub const EditorSystem = struct {
 
         // Update keybinding manager context
         keybinding_manager.context.command_palette_open = command_palette.is_open;
-        keybinding_manager.context.editing_text = imgui.ImGuiSystem.wantsCaptureKeyboard() and !command_palette.is_open;
+        keybinding_manager.context.editing_text = imgui.ImGuiSystem.wantsCaptureKeyboard();
         keybinding_manager.context.gizmo_visible = gizmo.is_visible;
 
         // Process keybinding
@@ -269,6 +281,14 @@ pub const EditorSystem = struct {
 
         if (show_console) {
             console_panel.render(&show_console);
+        }
+
+        if (show_gizmo_panel) {
+            gizmo_panel.render(&show_gizmo_panel);
+        }
+
+        if (show_light_panel) {
+            light_panel.render(&show_light_panel);
         }
 
         // Material panel (placeholder)
@@ -346,6 +366,7 @@ pub const EditorSystem = struct {
                     if (picked_id != @import("editor_scene.zig").INVALID_OBJECT_ID) {
                         selection.select(picked_id);
                         gizmo.is_visible = true;
+                        show_gizmo_panel = true;
                         logger.info("[PICKING] Selected object {}", .{picked_id});
                     } else {
                         selection.deselect();
@@ -452,8 +473,11 @@ pub const EditorSystem = struct {
                 _ = imgui.menuItemSelected("Material Panel", &show_material_panel);
                 _ = imgui.menuItemSelected("Console", &show_console);
                 imgui.separator();
+                _ = imgui.menuItemSelected("Gizmo Panel", &show_gizmo_panel);
+                _ = imgui.menuItemSelected("Light Panel", &show_light_panel);
+                imgui.separator();
                 _ = imgui.menuItemSelected("Debug Overlay", &debug_overlay.is_visible);
-                _ = imgui.menuItemSelected("Gizmo", &gizmo.is_visible);
+                _ = imgui.menuItemSelected("Gizmo Overlay", &gizmo.is_visible);
                 imgui.endMenu();
             }
 
@@ -555,6 +579,14 @@ pub const EditorSystem = struct {
 
     fn gizmoToggleSpace() void {
         gizmo.toggleSpace();
+    }
+
+    fn toggleGizmoPanel() void {
+        show_gizmo_panel = !show_gizmo_panel;
+    }
+
+    fn toggleLightPanel() void {
+        show_light_panel = !show_light_panel;
     }
 
     // Public API for external access

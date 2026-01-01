@@ -95,7 +95,7 @@ pub const DebugOverlay = struct {
         // Get display size and position at bottom-left
         const io = imgui.getIO();
         const display_size = io.*.DisplaySize;
-        const panel_x: f32 = 10;
+        const panel_x: f32 = display_size.x - panel_width - 10;
         const panel_y: f32 = display_size.y - panel_height - 10;
 
         // Draw FPS panel background

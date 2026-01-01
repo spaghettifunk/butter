@@ -11,6 +11,7 @@ const math_types = @import("../math/types.zig");
 const math = @import("../math/math.zig");
 const resource_types = @import("../resources/types.zig");
 const geometry_types = @import("../systems/geometry.zig");
+const light = @import("../systems/light.zig");
 
 const builtin = @import("builtin");
 
@@ -281,6 +282,9 @@ pub const RendererSystem = struct {
     framebuffer_width: u32 = 1280,
     framebuffer_height: u32 = 720,
 
+    // Light system
+    light_system: ?light.LightSystem = null,
+
     /// Initialize the renderer system (called by engine at startup)
     pub fn initialize(backend_type: BackendType, application_name: []const u8) bool {
         instance = RendererSystem{
@@ -309,6 +313,10 @@ pub const RendererSystem = struct {
         instance.view = math.mat4Translation(0, 0, -30.0);
         instance.view = math.mat4Inverse(instance.view);
 
+        // Initialize light system
+        // Use page allocator for now as we don't have a specific one passed in
+        instance.light_system = light.LightSystem.init(std.heap.page_allocator);
+
         // Register with the shared context
         context.get().renderer = &instance;
         logger.info("Renderer system initialized.", .{});
@@ -318,6 +326,9 @@ pub const RendererSystem = struct {
     /// Shutdown the renderer system
     pub fn shutdown() void {
         if (context.get().renderer) |sys| {
+            if (sys.light_system) |*ls| {
+                ls.deinit();
+            }
             sys.backend.shutdown();
         }
         context.get().renderer = null;
@@ -360,7 +371,18 @@ pub const RendererSystem = struct {
         ubo.delta_time = delta_time;
         ubo.frame_count = @intCast(self.frame_number);
 
+        // Update light data from light system
+        if (self.light_system) |*ls| {
+            ubo.ambient_color = ls.ambient_color;
+            if (ls.getMainLight()) |main_light| {
+                ubo.light_direction = main_light.direction;
+                ubo.light_color = main_light.color;
+                ubo.light_intensity = main_light.intensity;
+            }
+        }
+
         self.backend.updateUBO(&ubo);
+
         return true;
     }
 

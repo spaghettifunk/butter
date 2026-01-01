@@ -33,7 +33,7 @@ pub const GltfMaterial = struct {
 
 /// Primitive within a mesh
 pub const GltfPrimitive = struct {
-    vertices: []math_types.Vertex3DExtended,
+    vertices: []math_types.Vertex3D,
     indices: []u32,
     material_index: ?u32 = null,
 };
@@ -353,7 +353,7 @@ fn parsePrimitive(
 
     // Build vertices
     const vertex_count = positions.len;
-    const vertices = allocator.alloc(math_types.Vertex3DExtended, vertex_count) catch return null;
+    const vertices = allocator.alloc(math_types.Vertex3D, vertex_count) catch return null;
 
     for (0..vertex_count) |i| {
         vertices[i] = .{

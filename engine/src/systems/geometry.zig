@@ -47,20 +47,7 @@ pub const DEFAULT_GEOMETRY_NAME: []const u8 = "default_quad";
 // Types
 // ============================================================================
 
-/// Vertex format enum
-pub const VertexFormat = enum(u8) {
-    /// Simple vertex format - Vertex3D (32 bytes)
-    simple,
-    /// Extended vertex format - Vertex3DExtended (64 bytes)
-    extended,
-
-    pub fn getStride(self: VertexFormat) usize {
-        return switch (self) {
-            .simple => @sizeOf(math_types.Vertex3D),
-            .extended => @sizeOf(math_types.Vertex3DExtended),
-        };
-    }
-};
+// Vertex format is now fixed to Vertex3D
 
 /// Index type enum
 pub const IndexType = enum(u8) {
@@ -103,7 +90,9 @@ pub const Geometry = struct {
 
     // Vertex data info
     vertex_count: u32 = 0,
-    vertex_format: VertexFormat = .simple,
+    // vertex_format removed - always Vertex3D
+
+    // vertex_format removed - always Vertex3D
 
     // Index data info
     index_count: u32 = 0,
@@ -128,7 +117,9 @@ pub const GeometryConfig = struct {
 
     // Vertex data
     vertex_count: u32 = 0,
-    vertex_format: VertexFormat = .simple,
+
+    // vertex_format removed - always Vertex3D
+
     vertices: ?*const anyopaque = null,
 
     // Index data (optional - if null, use non-indexed drawing)
@@ -328,7 +319,8 @@ pub const GeometrySystem = struct {
         var entry = &self.geometries[idx];
 
         // Create GPU buffers
-        const vertex_size = config.vertex_count * config.vertex_format.getStride();
+        const vertex_size = config.vertex_count * @sizeOf(math_types.Vertex3D);
+
         const vertices_bytes: [*]const u8 = @ptrCast(config.vertices.?);
 
         var indices_bytes: ?[*]const u8 = null;
@@ -356,7 +348,7 @@ pub const GeometrySystem = struct {
         entry.geometry.generation = 0;
         entry.geometry.internal_id = 0;
         entry.geometry.vertex_count = config.vertex_count;
-        entry.geometry.vertex_format = config.vertex_format;
+
         entry.geometry.index_count = config.index_count;
         entry.geometry.index_type = config.index_type;
         entry.geometry.internal_data = &entry.gpu_data.?;
@@ -453,7 +445,7 @@ pub const GeometrySystem = struct {
         // Create geometry config
         var config: GeometryConfig = .{
             .vertex_count = @intCast(result.vertices.len),
-            .vertex_format = .extended,
+
             .vertices = result.vertices.ptr,
             .index_count = @intCast(result.indices.len),
             .index_type = .u32,
@@ -499,7 +491,7 @@ pub const GeometrySystem = struct {
         // Create geometry config
         var config: GeometryConfig = .{
             .vertex_count = @intCast(prim.vertices.len),
-            .vertex_format = .extended,
+
             .vertices = prim.vertices.ptr,
             .index_count = @intCast(prim.indices.len),
             .index_type = .u32,
@@ -636,8 +628,10 @@ pub const GeometrySystem = struct {
                         0.0,
                         v * config.height - half_height,
                     },
-                    .color = config.color,
+                    .normal = .{ 0.0, 1.0, 0.0 },
                     .texcoord = .{ u * config.tile_x, v * config.tile_y },
+                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
                 };
                 v_idx += 1;
             }
@@ -709,7 +703,7 @@ pub const GeometrySystem = struct {
         // Create geometry config
         var geo_config: GeometryConfig = .{
             .vertex_count = @intCast(vertex_count),
-            .vertex_format = .simple,
+
             .vertices = vertices.ptr,
             .index_count = @intCast(index_count),
             .index_type = .u32,
@@ -777,11 +771,36 @@ pub const GeometrySystem = struct {
 
         for (face_verts, 0..) |face, face_idx| {
             const base_vertex: u32 = @intCast(face_idx * 4);
+            // Normals for this face
+
+            const face_normal = switch (face_idx) {
+                0 => [_]f32{ 0.0, 0.0, 1.0 }, // Front (+Z)
+                1 => [_]f32{ 0.0, 0.0, -1.0 }, // Back (-Z)
+                2 => [_]f32{ -1.0, 0.0, 0.0 }, // Left (-X)
+                3 => [_]f32{ 1.0, 0.0, 0.0 }, // Right (+X)
+                4 => [_]f32{ 0.0, 1.0, 0.0 }, // Top (+Y)
+                5 => [_]f32{ 0.0, -1.0, 0.0 }, // Bottom (-Y)
+                else => [_]f32{ 0.0, 1.0, 0.0 },
+            };
+
+            // Tangents for this face
+            const face_tangent = switch (face_idx) {
+                0 => [_]f32{ 1.0, 0.0, 0.0, 1.0 }, // Front (+Z) -> Right (+X)
+                1 => [_]f32{ -1.0, 0.0, 0.0, 1.0 }, // Back (-Z) -> Left (-X)
+                2 => [_]f32{ 0.0, 0.0, 1.0, 1.0 }, // Left (-X) -> Forward (+Z)
+                3 => [_]f32{ 0.0, 0.0, -1.0, 1.0 }, // Right (+X) -> Backward (-Z)
+                4 => [_]f32{ 1.0, 0.0, 0.0, 1.0 }, // Top (+Y) -> Right (+X)
+                5 => [_]f32{ 1.0, 0.0, 0.0, 1.0 }, // Bottom (-Y) -> Right (+X)
+                else => [_]f32{ 1.0, 0.0, 0.0, 1.0 },
+            };
+
             for (face, 0..) |pos, vert_idx| {
                 vertices[face_idx * 4 + vert_idx] = .{
                     .position = pos,
-                    .color = config.color,
+                    .normal = face_normal,
                     .texcoord = uvs[vert_idx],
+                    .tangent = face_tangent,
+                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
                 };
             }
 
@@ -800,7 +819,7 @@ pub const GeometrySystem = struct {
         // Create geometry config
         var geo_config: GeometryConfig = .{
             .vertex_count = @intCast(vertex_count),
-            .vertex_format = .simple,
+
             .vertices = vertices.ptr,
             .index_count = @intCast(index_count),
             .index_type = .u32,
@@ -859,10 +878,24 @@ pub const GeometrySystem = struct {
                 const u = @as(f32, @floatFromInt(sector)) / @as(f32, @floatFromInt(sectors));
                 const v = @as(f32, @floatFromInt(ring)) / @as(f32, @floatFromInt(rings));
 
+                // Normal is just the normalized position on unit sphere
+                const nx = x;
+                const ny = y;
+                const nz = z;
+
+                // Tangent calculation
+                // Tangent is along u direction (increasing theta, around Y axis)
+                // Derivative of position w.r.t. theta: (-sin_phi * sin_theta, 0, sin_phi * cos_theta)
+                const tx = -sin_theta;
+                const ty = 0.0;
+                const tz = cos_theta;
+
                 vertices[v_idx] = .{
                     .position = .{ x * config.radius, y * config.radius, z * config.radius },
-                    .color = config.color,
+                    .normal = .{ nx, ny, nz },
                     .texcoord = .{ u, v },
+                    .tangent = .{ tx, ty, tz, 1.0 },
+                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
                 };
                 v_idx += 1;
             }
@@ -898,7 +931,7 @@ pub const GeometrySystem = struct {
         // Create geometry config
         var geo_config: GeometryConfig = .{
             .vertex_count = @intCast(vertex_count),
-            .vertex_format = .simple,
+
             .vertices = vertices.ptr,
             .index_count = @intCast(index_count),
             .index_type = .u32,
@@ -958,10 +991,25 @@ pub const GeometrySystem = struct {
                 const cos_theta = @cos(theta);
                 const sin_theta = @sin(theta);
 
+                // Normal calculation for side
+                // Slope of the side
+                const slope = (config.radius_bottom - config.radius_top) / config.height;
+                // Normal vector (not normalized yet)
+                var nx = cos_theta;
+                var ny = slope;
+                var nz = sin_theta;
+                // Normalize
+                const len = @sqrt(nx * nx + ny * ny + nz * nz);
+                nx /= len;
+                ny /= len;
+                nz /= len;
+
                 vertices[v_idx] = .{
                     .position = .{ radius * cos_theta, y, radius * sin_theta },
-                    .color = config.color,
+                    .normal = .{ nx, ny, nz },
                     .texcoord = .{ u, v },
+                    .tangent = .{ -sin_theta, 0.0, cos_theta, 1.0 },
+                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
                 };
                 v_idx += 1;
             }
@@ -997,7 +1045,13 @@ pub const GeometrySystem = struct {
         if (!config.open_ended) {
             // Top cap center
             const top_center_idx: u32 = @intCast(v_idx);
-            vertices[v_idx] = .{ .position = .{ 0.0, half_height, 0.0 }, .color = config.color, .texcoord = .{ 0.5, 0.5 } };
+            vertices[v_idx] = .{
+                .position = .{ 0.0, half_height, 0.0 },
+                .normal = .{ 0.0, 1.0, 0.0 },
+                .texcoord = .{ 0.5, 0.5 },
+                .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
+            };
             v_idx += 1;
 
             for (0..radial_segs + 1) |r| {
@@ -1005,8 +1059,10 @@ pub const GeometrySystem = struct {
                 const theta = u * 2.0 * math.K_PI;
                 vertices[v_idx] = .{
                     .position = .{ config.radius_top * @cos(theta), half_height, config.radius_top * @sin(theta) },
-                    .color = config.color,
+                    .normal = .{ 0.0, 1.0, 0.0 },
                     .texcoord = .{ @cos(theta) * 0.5 + 0.5, @sin(theta) * 0.5 + 0.5 },
+                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
                 };
                 v_idx += 1;
             }
@@ -1021,7 +1077,13 @@ pub const GeometrySystem = struct {
 
             // Bottom cap center
             const bottom_center_idx: u32 = @intCast(v_idx);
-            vertices[v_idx] = .{ .position = .{ 0.0, -half_height, 0.0 }, .color = config.color, .texcoord = .{ 0.5, 0.5 } };
+            vertices[v_idx] = .{
+                .position = .{ 0.0, -half_height, 0.0 },
+                .normal = .{ 0.0, -1.0, 0.0 },
+                .texcoord = .{ 0.5, 0.5 },
+                .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
+            };
             v_idx += 1;
 
             for (0..radial_segs + 1) |r| {
@@ -1029,8 +1091,10 @@ pub const GeometrySystem = struct {
                 const theta = u * 2.0 * math.K_PI;
                 vertices[v_idx] = .{
                     .position = .{ config.radius_bottom * @cos(theta), -half_height, config.radius_bottom * @sin(theta) },
-                    .color = config.color,
+                    .normal = .{ 0.0, -1.0, 0.0 },
                     .texcoord = .{ @cos(theta) * 0.5 + 0.5, @sin(theta) * 0.5 + 0.5 },
+                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
                 };
                 v_idx += 1;
             }
@@ -1047,7 +1111,7 @@ pub const GeometrySystem = struct {
         // Create geometry config
         var geo_config: GeometryConfig = .{
             .vertex_count = @intCast(v_idx),
-            .vertex_format = .simple,
+
             .vertices = vertices.ptr,
             .index_count = @intCast(i_idx),
             .index_type = .u32,
@@ -1083,8 +1147,8 @@ pub const GeometrySystem = struct {
     // ========== Private helpers ==========
 
     fn createDefaultGeometry(self: *GeometrySystem) bool {
-        // Create a simple quad (4 vertices, 6 indices) using extended vertex format
-        const vertices = [_]math_types.Vertex3DExtended{
+        // Create a simple quad (4 vertices, 6 indices) using universal Vertex3D format
+        const vertices = [_]math_types.Vertex3D{
             // Bottom-left
             .{
                 .position = .{ -0.5, 0.0, -0.5 },
@@ -1123,8 +1187,8 @@ pub const GeometrySystem = struct {
 
         var config: GeometryConfig = .{
             .vertex_count = 4,
-            .vertex_format = .extended,
             .vertices = &vertices,
+
             .index_count = 6,
             .index_type = .u32,
             .indices = &indices,
@@ -1325,7 +1389,8 @@ pub const GeometrySystem = struct {
         var max_pos: [3]f32 = .{ -std.math.floatMax(f32), -std.math.floatMax(f32), -std.math.floatMax(f32) };
 
         // Iterate through vertices based on format
-        const stride = config.vertex_format.getStride();
+        const stride = @sizeOf(math_types.Vertex3D);
+
         const vertices_bytes: [*]const u8 = @ptrCast(config.vertices.?);
 
         for (0..config.vertex_count) |i| {

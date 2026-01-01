@@ -3,6 +3,28 @@
 
 using namespace metal;
 
+struct GlobalUBO
+{
+    float4x4 projection;
+    float4x4 view;
+    float4x4 light_space_matrix;
+    float4x4 shadow_projection;
+    packed_float3 camera_position;
+    float _pad0;
+    packed_float3 light_direction;
+    float light_intensity;
+    packed_float3 light_color;
+    float shadow_map_size;
+    float2 screen_size;
+    float near_plane;
+    float far_plane;
+    float time;
+    float delta_time;
+    uint frame_count;
+    float _pad1;
+    float4 ambient_color;
+};
+
 struct main0_out
 {
     float4 out_color [[color(0)]];
@@ -10,15 +32,27 @@ struct main0_out
 
 struct main0_in
 {
-    float3 frag_color [[user(locn0)]];
+    float4 frag_color [[user(locn0)]];
     float2 frag_texcoord [[user(locn1)]];
+    float3 frag_normal [[user(locn2)]];
+    float3 frag_pos [[user(locn3)]];
 };
 
-fragment main0_out main0(main0_in in [[stage_in]], texture2d<float> tex_sampler [[texture(0)]], sampler tex_samplerSmplr [[sampler(0)]])
+fragment main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buffer(0)]], texture2d<float> tex_sampler [[texture(0)]], sampler tex_samplerSmplr [[sampler(0)]])
 {
     main0_out out = {};
     float4 tex_color = tex_sampler.sample(tex_samplerSmplr, in.frag_texcoord);
-    out.out_color = tex_color * float4(in.frag_color, 1.0);
+    float3 ambient = ubo.ambient_color.xyz * ubo.ambient_color.w;
+    float3 norm = fast::normalize(in.frag_normal);
+    float3 light_dir = fast::normalize(-float3(ubo.light_direction));
+    float diff = fast::max(dot(norm, light_dir), 0.0);
+    float3 diffuse = (float3(ubo.light_color) * diff) * ubo.light_intensity;
+    float3 view_dir = fast::normalize(float3(ubo.camera_position) - in.frag_pos);
+    float3 halfway_dir = fast::normalize(light_dir + view_dir);
+    float spec = powr(fast::max(dot(norm, halfway_dir), 0.0), 32.0);
+    float3 specular = (float3(0.5) * spec) * ubo.light_intensity;
+    float3 result = (((ambient + diffuse) + specular) * tex_color.xyz) * in.frag_color.xyz;
+    out.out_color = float4(result, tex_color.w * in.frag_color.w);
     return out;
 }
 

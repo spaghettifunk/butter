@@ -251,6 +251,10 @@ pub const Gizmo = struct {
                     z_col,
                     axis_thickness,
                 );
+                // Labels
+                imgui.drawListAddText(draw_list, .{ .x = center_x + axis_length + arrow_size + 5, .y = center_y - 7 }, x_col, "X");
+                imgui.drawListAddText(draw_list, .{ .x = center_x - 4, .y = center_y - axis_length - arrow_size - 15 }, y_col, "Y");
+                imgui.drawListAddText(draw_list, .{ .x = z_end_x + 5, .y = z_end_y + 5 }, z_col, "Z");
             },
             .rotate => {
                 // Draw rotation circles
@@ -259,14 +263,17 @@ pub const Gizmo = struct {
                 // X rotation (YZ plane)
                 const x_col = if (self.hovered_axis == .x or self.dragging_axis == .x) hover_color else x_color;
                 imgui.drawListAddCircleEx(draw_list, .{ .x = center_x, .y = center_y }, radius, x_col, 32, axis_thickness);
+                imgui.drawListAddText(draw_list, .{ .x = center_x + radius * 0.7 + 5, .y = center_y - radius * 0.7 - 7 }, x_col, "X");
 
                 // Y rotation (XZ plane) - draw as ellipse
                 const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
                 imgui.drawListAddEllipseEx(draw_list, .{ .x = center_x, .y = center_y }, .{ .x = radius, .y = radius * 0.3 }, y_col, 0, 32, axis_thickness);
+                imgui.drawListAddText(draw_list, .{ .x = center_x + radius + 10, .y = center_y - 7 }, y_col, "Y");
 
                 // Z rotation (XY plane) - draw as ellipse
                 const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
                 imgui.drawListAddEllipseEx(draw_list, .{ .x = center_x, .y = center_y }, .{ .x = radius * 0.3, .y = radius }, z_col, 0, 32, axis_thickness);
+                imgui.drawListAddText(draw_list, .{ .x = center_x - 4, .y = center_y - radius - 15 }, z_col, "Z");
             },
             .scale => {
                 // X axis with box
@@ -284,6 +291,7 @@ pub const Gizmo = struct {
                     .{ .x = center_x + axis_length + 5, .y = center_y + 5 },
                     x_col,
                 );
+                imgui.drawListAddText(draw_list, .{ .x = center_x + axis_length + 10, .y = center_y - 7 }, x_col, "X");
 
                 // Y axis with box
                 const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
@@ -300,6 +308,7 @@ pub const Gizmo = struct {
                     .{ .x = center_x + 5, .y = center_y - axis_length + 5 },
                     y_col,
                 );
+                imgui.drawListAddText(draw_list, .{ .x = center_x - 4, .y = center_y - axis_length - 20 }, y_col, "Y");
 
                 // Z axis with box
                 const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
@@ -318,6 +327,7 @@ pub const Gizmo = struct {
                     .{ .x = z_end_x + 5, .y = z_end_y + 5 },
                     z_col,
                 );
+                imgui.drawListAddText(draw_list, .{ .x = z_end_x + 10, .y = z_end_y + 5 }, z_col, "Z");
 
                 // Center cube for uniform scale
                 const all_col = if (self.hovered_axis == .all or self.dragging_axis == .all) hover_color else text_color;

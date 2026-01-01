@@ -24,7 +24,8 @@ pub const SubMesh = struct {
 
 /// Result of loading an OBJ file
 pub const ObjLoadResult = struct {
-    vertices: []math_types.Vertex3DExtended,
+    vertices: []math_types.Vertex3D,
+
     indices: []u32,
     sub_meshes: []SubMesh,
     allocator: std.mem.Allocator,
@@ -136,7 +137,7 @@ pub fn parseObj(allocator: std.mem.Allocator, data: []const u8) ?ObjLoadResult {
 
     // Allocate output arrays (worst case: each face vertex is unique)
     const max_vertices = face_count * 3;
-    var out_vertices = allocator.alloc(math_types.Vertex3DExtended, max_vertices) catch {
+    var out_vertices = allocator.alloc(math_types.Vertex3D, max_vertices) catch {
         logger.err("Failed to allocate output vertices", .{});
         return null;
     };
@@ -360,7 +361,7 @@ fn parseFaceVertex(str: []const u8) FaceVertex {
 }
 
 /// Compute tangent vectors for all vertices using MikkTSpace-like algorithm
-fn computeTangents(vertices: []math_types.Vertex3DExtended, indices: []const u32) void {
+fn computeTangents(vertices: []math_types.Vertex3D, indices: []const u32) void {
     if (indices.len < 3) return;
 
     // Initialize tangents to zero for accumulation

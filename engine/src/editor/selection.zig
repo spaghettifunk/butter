@@ -10,6 +10,8 @@ const INVALID_OBJECT_ID = editor_scene.INVALID_OBJECT_ID;
 pub const Selection = struct {
     /// Currently selected object ID (0 = none)
     selected_id: EditorObjectId = INVALID_OBJECT_ID,
+    /// Currently selected light ID (0 = none)
+    selected_light_id: u32 = 0,
 
     /// Optional callback for selection changes
     on_selection_changed: ?*const fn (old_id: EditorObjectId, new_id: EditorObjectId) void = null,
@@ -21,14 +23,36 @@ pub const Selection = struct {
         const old_id = self.selected_id;
         self.selected_id = id;
 
+        // Deselect light if object is selected
+        if (id != INVALID_OBJECT_ID) {
+            self.selected_light_id = 0;
+        }
+
         if (self.on_selection_changed) |callback| {
             callback(old_id, id);
         }
     }
 
+    /// Select a light by ID
+    pub fn selectLight(self: *Selection, id: u32) void {
+        if (self.selected_light_id == id) return;
+
+        // Deselect object if light is selected
+        if (id != 0) {
+            self.deselect();
+        }
+
+        self.selected_light_id = id;
+    }
+
     /// Deselect the current object
     pub fn deselect(self: *Selection) void {
         self.select(INVALID_OBJECT_ID);
+    }
+
+    /// Deselect the current light
+    pub fn deselectLight(self: *Selection) void {
+        self.selected_light_id = 0;
     }
 
     /// Check if a specific object is selected

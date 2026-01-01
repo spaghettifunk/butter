@@ -19,7 +19,9 @@ const texture = @import("systems/texture.zig");
 const material = @import("systems/material.zig");
 const geometry = @import("systems/geometry.zig");
 const renderer = @import("renderer/renderer.zig");
+
 const render_graph = @import("renderer/render_graph/mod.zig");
+
 const CommandRegistry = @import("editor/commands/registry.zig").CommandRegistry;
 const EditorScene = @import("editor/editor_scene.zig").EditorScene;
 
@@ -35,7 +37,9 @@ pub const EngineContext = extern struct {
     material: ?*material.MaterialSystem,
     geometry: ?*geometry.GeometrySystem,
     renderer: ?*renderer.RendererSystem,
+
     render_graph: ?*render_graph.RenderGraph,
+
     platform_window: ?*anyopaque, // Opaque pointer to GLFW window
     command_registry: ?*CommandRegistry, // Editor command registry
     editor_scene: ?*EditorScene, // Editor scene (shared across library boundaries)
@@ -53,7 +57,9 @@ var contextStorage: EngineContext = .{
     .material = null,
     .geometry = null,
     .renderer = null,
+
     .render_graph = null,
+
     .platform_window = null,
     .command_registry = null,
     .editor_scene = null,
