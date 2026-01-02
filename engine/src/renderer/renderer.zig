@@ -82,6 +82,59 @@ pub const GlobalUBO = extern struct {
     }
 };
 
+/// Grid shader uniform buffer object
+/// Matches the GLSL layout in Builtin.GridShader.frag.glsl (set=0, binding=1)
+/// Using explicit floats instead of vec3 to ensure consistent memory layout
+/// across Vulkan (std140) and Metal (packed) backends.
+/// Total size: 96 bytes
+pub const GridUBO = extern struct {
+    camera_pos_x: f32,       // offset 0
+    camera_pos_y: f32,       // offset 4
+    camera_pos_z: f32,       // offset 8
+    grid_height: f32,        // offset 12
+
+    minor_spacing: f32,      // offset 16
+    major_spacing: f32,      // offset 20
+    fade_distance: f32,      // offset 24
+    _pad0: f32,              // offset 28 - padding before vec4s
+
+    minor_color: [4]f32,     // offset 32
+    major_color: [4]f32,     // offset 48
+    axis_x_color: [4]f32,    // offset 64
+    axis_z_color: [4]f32,    // offset 80
+
+    pub fn initDefault() GridUBO {
+        return GridUBO{
+            .camera_pos_x = 0,
+            .camera_pos_y = 0,
+            .camera_pos_z = 0,
+            .grid_height = 0.0,
+            .minor_spacing = 1.0,
+            .major_spacing = 10.0,
+            .fade_distance = 500.0, // Increased from 100 to reduce fading
+            ._pad0 = 0,
+            // Grid lines in black, axes in color
+            .minor_color = .{ 0.0, 0.0, 0.0, 1.0 },  // Black
+            .major_color = .{ 0.0, 0.0, 0.0, 1.0 },  // Black
+            .axis_x_color = .{ 1.0, 0.0, 0.0, 1.0 }, // Red for X axis
+            .axis_z_color = .{ 0.0, 0.0, 1.0, 1.0 }, // Blue for Z axis
+        };
+    }
+};
+
+/// Grid camera UBO (view-projection matrix only)
+/// Matches the GLSL layout in Builtin.GridShader.vert.glsl (set=0, binding=0)
+/// Total size: 64 bytes
+pub const GridCameraUBO = extern struct {
+    view_proj: math_types.Mat4,
+
+    pub fn init() GridCameraUBO {
+        return GridCameraUBO{
+            .view_proj = math.mat4Identity(),
+        };
+    }
+};
+
 /// Backend interface - defines what every backend must implement.
 /// This replaces the C function pointer approach with Zig's interface pattern.
 pub const Backend = union(BackendType) {

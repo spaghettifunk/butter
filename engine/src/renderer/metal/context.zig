@@ -1,6 +1,8 @@
 //! Metal context - holds all Metal-specific state.
 
 const std = @import("std");
+const metal_buffer = @import("buffer.zig");
+const metal_pipeline = @import("pipeline.zig");
 
 const objc = @cImport({
     @cInclude("objc/runtime.h");
@@ -83,6 +85,7 @@ pub const MTLPixelFormat = struct {
     pub const BGRA8Unorm_sRGB: u64 = 81; // sRGB version for gamma-correct rendering
     pub const RGBA8Unorm: u64 = 70;
     pub const RGBA8Unorm_sRGB: u64 = 71; // sRGB version
+    pub const RGBA16Float: u64 = 115; // Half-precision floating point
     pub const R8Unorm: u64 = 10;
     pub const RG8Unorm: u64 = 30;
     pub const Depth32Float: u64 = 252;
@@ -214,6 +217,17 @@ pub const MetalContext = struct {
     // Framebuffer dimensions
     framebuffer_width: u32 = 0,
     framebuffer_height: u32 = 0,
+
+    // Grid shader state (editor only)
+    grid_vertex_shader: MTLFunction = null,
+    grid_fragment_shader: MTLFunction = null,
+    grid_pipeline: metal_pipeline.MetalPipeline = .{},
+    grid_camera_buffers: [MAX_FRAMES_IN_FLIGHT]metal_buffer.MetalBuffer = [_]metal_buffer.MetalBuffer{.{}} ** MAX_FRAMES_IN_FLIGHT,
+    grid_ubo_buffers: [MAX_FRAMES_IN_FLIGHT]metal_buffer.MetalBuffer = [_]metal_buffer.MetalBuffer{.{}} ** MAX_FRAMES_IN_FLIGHT,
+    grid_geometry_vertex_buffer: metal_buffer.MetalBuffer = .{},
+    grid_geometry_index_buffer: metal_buffer.MetalBuffer = .{},
+    grid_geometry_vertex_count: u32 = 0,
+    grid_geometry_index_count: u32 = 0,
 };
 
 // ============================================================================

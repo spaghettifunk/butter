@@ -24,7 +24,7 @@ pub const VulkanRenderpass = struct {
         .offset = .{ .x = 0, .y = 0 },
         .extent = .{ .width = 0, .height = 0 },
     },
-    clear_color: vk.VkClearColorValue = .{ .float32 = .{ 0.0, 0.0, 0.2, 1.0 } },
+    clear_color: vk.VkClearColorValue = .{ .float32 = .{ 0.53, 0.81, 0.92, 1.0 } }, // Light sky blue
     depth: f32 = 1.0,
     stencil: u32 = 0,
     state: RenderpassState = .not_allocated,
@@ -202,9 +202,9 @@ pub fn createMainRenderpass(
         .extent = context.swapchain.extent,
     };
 
-    // Default clear color (dark blue)
+    // Default clear color (light sky blue)
     const clear_color = vk.VkClearColorValue{
-        .float32 = .{ 0.0, 0.0, 0.2, 1.0 },
+        .float32 = .{ 0.53, 0.81, 0.92, 1.0 },
     };
 
     return create(

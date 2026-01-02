@@ -39,6 +39,18 @@ pub const MaterialShader = struct {
     pipeline: VulkanPipeline = .{},
 };
 
+/// Grid shader - specialized shader for editor grid rendering
+pub const GridShader = struct {
+    /// Vertex shader module
+    vertex_shader: shader.VulkanShaderModule = .{},
+
+    /// Fragment shader module
+    fragment_shader: shader.VulkanShaderModule = .{},
+
+    /// Graphics pipeline
+    pipeline: VulkanPipeline = .{},
+};
+
 /// Get vertex input binding description for Vertex3D
 pub fn getVertexBindingDescription() vk.VkVertexInputBindingDescription {
     return .{
@@ -365,4 +377,246 @@ pub fn pushConstants(
         @sizeOf(PushConstantObject),
         push_constant,
     );
+}
+
+/// Create the graphics pipeline for the grid shader
+pub fn createGridPipeline(
+    context: *vk_context.VulkanContext,
+    grid_shader: *GridShader,
+    descriptor_layout: vk.VkDescriptorSetLayout,
+    renderpass: vk.VkRenderPass,
+) bool {
+    logger.debug("Creating grid shader pipeline...", .{});
+
+    // Shader stages
+    var shader_stages: [2]vk.VkPipelineShaderStageCreateInfo = .{
+        shader.createStageInfo(.{
+            .module = grid_shader.vertex_shader.handle,
+            .stage = .vertex,
+        }),
+        shader.createStageInfo(.{
+            .module = grid_shader.fragment_shader.handle,
+            .stage = .fragment,
+        }),
+    };
+
+    // Vertex input - only position (vec3)
+    var binding_description = vk.VkVertexInputBindingDescription{
+        .binding = 0,
+        .stride = @sizeOf([3]f32),
+        .inputRate = vk.VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+
+    var attribute_descriptions = [1]vk.VkVertexInputAttributeDescription{
+        .{
+            .location = 0,
+            .binding = 0,
+            .format = vk.VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = 0,
+        },
+    };
+
+    var vertex_input_info: vk.VkPipelineVertexInputStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding_description,
+        .vertexAttributeDescriptionCount = attribute_descriptions.len,
+        .pVertexAttributeDescriptions = &attribute_descriptions,
+    };
+
+    // Input assembly
+    var input_assembly: vk.VkPipelineInputAssemblyStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .topology = vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = vk.VK_FALSE,
+    };
+
+    // Viewport state (dynamic)
+    var viewport_state: vk.VkPipelineViewportStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .viewportCount = 1,
+        .pViewports = null,
+        .scissorCount = 1,
+        .pScissors = null,
+    };
+
+    // Rasterizer
+    var rasterizer: vk.VkPipelineRasterizationStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .depthClampEnable = vk.VK_FALSE,
+        .rasterizerDiscardEnable = vk.VK_FALSE,
+        .polygonMode = vk.VK_POLYGON_MODE_FILL,
+        .cullMode = vk.VK_CULL_MODE_NONE,
+        .frontFace = vk.VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = vk.VK_FALSE,
+        .depthBiasConstantFactor = 0.0,
+        .depthBiasClamp = 0.0,
+        .depthBiasSlopeFactor = 0.0,
+        .lineWidth = 1.0,
+    };
+
+    // Multisampling
+    var multisampling: vk.VkPipelineMultisampleStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .rasterizationSamples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable = vk.VK_FALSE,
+        .minSampleShading = 1.0,
+        .pSampleMask = null,
+        .alphaToCoverageEnable = vk.VK_FALSE,
+        .alphaToOneEnable = vk.VK_FALSE,
+    };
+
+    // Depth stencil
+    var depth_stencil: vk.VkPipelineDepthStencilStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .depthTestEnable = vk.VK_TRUE,
+        .depthWriteEnable = vk.VK_FALSE,
+        .depthCompareOp = vk.VK_COMPARE_OP_LESS_OR_EQUAL,
+        .depthBoundsTestEnable = vk.VK_FALSE,
+        .stencilTestEnable = vk.VK_FALSE,
+        .front = std.mem.zeroes(vk.VkStencilOpState),
+        .back = std.mem.zeroes(vk.VkStencilOpState),
+        .minDepthBounds = 0.0,
+        .maxDepthBounds = 1.0,
+    };
+
+    // Color blending
+    var color_blend_attachment: vk.VkPipelineColorBlendAttachmentState = .{
+        .blendEnable = vk.VK_TRUE,
+        .srcColorBlendFactor = vk.VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = vk.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = vk.VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = vk.VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = vk.VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = vk.VK_BLEND_OP_ADD,
+        .colorWriteMask = vk.VK_COLOR_COMPONENT_R_BIT |
+            vk.VK_COLOR_COMPONENT_G_BIT |
+            vk.VK_COLOR_COMPONENT_B_BIT |
+            vk.VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    var color_blending: vk.VkPipelineColorBlendStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .logicOpEnable = vk.VK_FALSE,
+        .logicOp = vk.VK_LOGIC_OP_COPY,
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+        .blendConstants = .{ 0.0, 0.0, 0.0, 0.0 },
+    };
+
+    // Dynamic state
+    var dynamic_states = [_]vk.VkDynamicState{
+        vk.VK_DYNAMIC_STATE_VIEWPORT,
+        vk.VK_DYNAMIC_STATE_SCISSOR,
+    };
+
+    var dynamic_state: vk.VkPipelineDynamicStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .dynamicStateCount = dynamic_states.len,
+        .pDynamicStates = &dynamic_states,
+    };
+
+    // Pipeline layout
+    var set_layouts = [1]vk.VkDescriptorSetLayout{descriptor_layout};
+
+    var pipeline_layout_info: vk.VkPipelineLayoutCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .setLayoutCount = 1,
+        .pSetLayouts = &set_layouts,
+        .pushConstantRangeCount = 0,
+        .pPushConstantRanges = null,
+    };
+
+    var result = vk.vkCreatePipelineLayout(
+        context.device,
+        &pipeline_layout_info,
+        context.allocator,
+        &grid_shader.pipeline.layout,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreatePipelineLayout (grid) failed: {}", .{result});
+        return false;
+    }
+
+    // Create graphics pipeline
+    var pipeline_info: vk.VkGraphicsPipelineCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stageCount = shader_stages.len,
+        .pStages = &shader_stages,
+        .pVertexInputState = &vertex_input_info,
+        .pInputAssemblyState = &input_assembly,
+        .pTessellationState = null,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state,
+        .layout = grid_shader.pipeline.layout,
+        .renderPass = renderpass,
+        .subpass = 0,
+        .basePipelineHandle = null,
+        .basePipelineIndex = -1,
+    };
+
+    result = vk.vkCreateGraphicsPipelines(
+        context.device,
+        null,
+        1,
+        &pipeline_info,
+        context.allocator,
+        &grid_shader.pipeline.handle,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateGraphicsPipelines (grid) failed: {}", .{result});
+        vk.vkDestroyPipelineLayout(context.device, grid_shader.pipeline.layout, context.allocator);
+        grid_shader.pipeline.layout = null;
+        return false;
+    }
+
+    logger.info("Grid pipeline created.", .{});
+    return true;
+}
+
+/// Destroy the grid shader pipeline and modules
+pub fn destroyGridShader(
+    context: *vk_context.VulkanContext,
+    grid_shader: *GridShader,
+) void {
+    if (context.device == null) return;
+
+    if (grid_shader.pipeline.handle) |handle| {
+        vk.vkDestroyPipeline(context.device, handle, context.allocator);
+        grid_shader.pipeline.handle = null;
+    }
+
+    if (grid_shader.pipeline.layout) |layout| {
+        vk.vkDestroyPipelineLayout(context.device, layout, context.allocator);
+        grid_shader.pipeline.layout = null;
+    }
+
+    shader.destroy(context, &grid_shader.vertex_shader);
+    shader.destroy(context, &grid_shader.fragment_shader);
 }

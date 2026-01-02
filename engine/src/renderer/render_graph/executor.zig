@@ -213,7 +213,7 @@ pub fn buildDefaultGraph(
             .resource = main_color,
             .load_op = .clear,
             .store_op = .store,
-            .clear_color = .{ 0.0, 0.0, 0.2, 1.0 },
+            .clear_color = .{ 0.53, 0.81, 0.92, 1.0 }, // Light sky blue (RGB: 135, 206, 235)
         });
 
         main_pass.depth_attachment = .{
@@ -228,6 +228,22 @@ pub fn buildDefaultGraph(
             .binding = 2,
             .shader_stages = pass_mod.ShaderStageFlags.fragment_only,
         });
+    }
+
+    // Create grid pass (editor only, renders after main pass clears)
+    if (graph.addPass("grid_pass", .graphics)) |grid_pass| {
+        _ = grid_pass.addColorAttachment(.{
+            .resource = main_color,
+            .load_op = .load, // Preserve cleared color
+            .store_op = .store,
+        });
+
+        grid_pass.depth_attachment = .{
+            .resource = main_depth,
+            .load_op = .load, // Preserve cleared depth
+            .store_op = .dont_care,
+            .read_only = false,
+        };
     }
 
     // Create post-process pass

@@ -119,6 +119,24 @@ pub const VulkanContext = struct {
     global_uniform_buffers: [swapchain.MAX_SWAPCHAIN_IMAGES]buffer.VulkanBuffer =
         [_]buffer.VulkanBuffer{.{}} ** swapchain.MAX_SWAPCHAIN_IMAGES,
 
+    // Grid shader and pipeline (editor only)
+    grid_shader: pipeline.GridShader = .{},
+
+    // Grid descriptor state
+    grid_descriptor_state: descriptor.GridShaderDescriptorState = .{},
+
+    // Grid uniform buffers (one per frame in flight)
+    grid_camera_buffers: [swapchain.MAX_SWAPCHAIN_IMAGES]buffer.VulkanBuffer =
+        [_]buffer.VulkanBuffer{.{}} ** swapchain.MAX_SWAPCHAIN_IMAGES,
+    grid_ubo_buffers: [swapchain.MAX_SWAPCHAIN_IMAGES]buffer.VulkanBuffer =
+        [_]buffer.VulkanBuffer{.{}} ** swapchain.MAX_SWAPCHAIN_IMAGES,
+
+    // Grid geometry
+    grid_geometry_vertex_buffer: buffer.VulkanBuffer = .{},
+    grid_geometry_index_buffer: buffer.VulkanBuffer = .{},
+    grid_geometry_vertex_count: u32 = 0,
+    grid_geometry_index_count: u32 = 0,
+
     // Default texture (white 1x1 texture used when no texture is bound)
     default_texture: resource_types.Texture = .{
         .id = 0,

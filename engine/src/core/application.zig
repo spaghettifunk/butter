@@ -195,7 +195,7 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
 
     // Initialize renderer subsystem
     // TODO: make backend type configurable
-    if (!renderer.RendererSystem.initialize(.metal, appState.gameInstance.appConfig.name)) {
+    if (!renderer.RendererSystem.initialize(.vulkan, appState.gameInstance.appConfig.name)) {
         logger.err("Failed to initialize renderer subsystem.", .{});
         return false;
     }
@@ -225,6 +225,42 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
     )) {
         logger.err("Failed to initialize render graph system.", .{});
         return false;
+    }
+
+    // Register grid pass callback (editor only)
+    if (build_options.enable_editor and editorMode) {
+        logger.debug("Registering grid pass callback (editor mode active)...", .{});
+        if (renderer.getSystem()) |sys| {
+            switch (sys.backend) {
+                .vulkan => |*v| {
+                    logger.debug("Registering grid callback for Vulkan backend", .{});
+                    if (!render_graph.RenderGraphSystem.setPassCallback(
+                        "grid_pass",
+                        @import("../renderer/vulkan/backend.zig").VulkanBackend.renderGridPass,
+                        v,
+                    )) {
+                        logger.warn("Failed to register grid pass callback", .{});
+                    } else {
+                        logger.info("Grid pass callback registered successfully (Vulkan)", .{});
+                    }
+                },
+                .metal => |*m| {
+                    logger.debug("Registering grid callback for Metal backend", .{});
+                    if (!render_graph.RenderGraphSystem.setPassCallback(
+                        "grid_pass",
+                        @import("../renderer/metal/backend.zig").MetalBackend.renderGridPass,
+                        m,
+                    )) {
+                        logger.warn("Failed to register grid pass callback", .{});
+                    } else {
+                        logger.info("Grid pass callback registered successfully (Metal)", .{});
+                    }
+                },
+                else => {},
+            }
+        }
+    } else {
+        logger.debug("NOT registering grid callback: enable_editor={}, editorMode={}", .{ build_options.enable_editor, editorMode });
     }
 
     // Initialize ImGui system (after renderer) - only in editor mode with ImGui enabled
@@ -286,21 +322,11 @@ pub fn run() bool {
             }
 
             if (renderer.getSystem()) |sys| {
-
                 // Begin the frame (starts command buffer recording)
                 if (sys.beginFrame(delta_f32)) {
                     // Begin ImGui frame (must be after renderer beginFrame) - only in editor mode
                     if (build_options.enable_imgui and appState.editorMode) {
                         imgui.ImGuiSystem.beginFrame();
-                    }
-
-                    // Execute render graph passes
-                    // Note: Currently the render graph just logs execution, actual rendering
-                    // still happens via the game's render callback below. Eventually the game
-                    // will register callbacks with specific passes rather than a single render call.
-                    if (!render_graph.RenderGraphSystem.execute(delta_f32)) {
-                        logger.warn("Render graph execution failed", .{});
-                        // Don't fail completely, fall back to traditional rendering
                     }
 
                     // Call the game's render routine (now inside the frame)
@@ -309,6 +335,15 @@ pub fn run() bool {
                         logger.err("Game render failed, shutting down.", .{});
                         appState.isRunning = false;
                         break;
+                    }
+
+                    // Execute render graph passes (AFTER game render so grid appears on top)
+                    // Note: Currently the render graph just logs execution, actual rendering
+                    // still happens via the game's render callback above. The grid pass executes here
+                    // so it renders on top of the game geometry.
+                    if (!render_graph.RenderGraphSystem.execute(delta_f32)) {
+                        logger.warn("Render graph execution failed", .{});
+                        // Don't fail completely, fall back to traditional rendering
                     }
 
                     // Update editor UI (command palette, panels, overlays) - only in editor mode

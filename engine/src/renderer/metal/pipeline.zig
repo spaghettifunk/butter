@@ -279,3 +279,156 @@ pub fn pushConstants(encoder: ?*anyopaque, push_constant: *const PushConstantObj
 pub fn isValid(pipeline: *const MetalPipeline) bool {
     return pipeline.state != null;
 }
+
+/// Create grid pipeline (simplified vertex format - only position)
+pub fn createGridPipeline(
+    context: *MetalContext,
+    vertex_function: metal_context.MTLFunction,
+    fragment_function: metal_context.MTLFunction,
+    pipeline: *MetalPipeline,
+) bool {
+    const device = context.device orelse {
+        logger.err("Cannot create grid pipeline: no Metal device", .{});
+        return false;
+    };
+
+    logger.debug("Creating grid shader pipeline...", .{});
+
+    // Create render pipeline descriptor
+    const desc_class = getClass("MTLRenderPipelineDescriptor") orelse {
+        logger.err("Failed to get MTLRenderPipelineDescriptor class", .{});
+        return false;
+    };
+
+    const desc_alloc = msg(?*anyopaque, desc_class, sel("alloc"));
+    if (desc_alloc == null) return false;
+
+    const desc = msg(?*anyopaque, desc_alloc, sel("init"));
+    if (desc == null) return false;
+
+    // Set vertex and fragment functions
+    _ = msg1(void, desc, sel("setVertexFunction:"), vertex_function);
+    _ = msg1(void, desc, sel("setFragmentFunction:"), fragment_function);
+
+    // Configure color attachment with alpha blending
+    const color_attachments = msg(?*anyopaque, desc, sel("colorAttachments"));
+    if (color_attachments) |attachments| {
+        const attachment = msg1(?*anyopaque, attachments, sel("objectAtIndexedSubscript:"), @as(u64, 0));
+        if (attachment) |att| {
+            // Must match main_color resource format (rgba16_float)
+            _ = msg1(void, att, sel("setPixelFormat:"), @as(u64, metal_context.MTLPixelFormat.RGBA16Float));
+
+            // Enable blending for grid transparency
+            _ = msg1(void, att, sel("setBlendingEnabled:"), @as(i8, 1));
+            _ = msg1(void, att, sel("setSourceRGBBlendFactor:"), @as(u64, 4)); // MTLBlendFactorSourceAlpha
+            _ = msg1(void, att, sel("setDestinationRGBBlendFactor:"), @as(u64, 5)); // MTLBlendFactorOneMinusSourceAlpha
+            _ = msg1(void, att, sel("setRgbBlendOperation:"), @as(u64, 0)); // MTLBlendOperationAdd
+            _ = msg1(void, att, sel("setSourceAlphaBlendFactor:"), @as(u64, 1)); // MTLBlendFactorOne
+            _ = msg1(void, att, sel("setDestinationAlphaBlendFactor:"), @as(u64, 0)); // MTLBlendFactorZero
+            _ = msg1(void, att, sel("setAlphaBlendOperation:"), @as(u64, 0)); // MTLBlendOperationAdd
+        }
+    }
+
+    // Set depth attachment format
+    _ = msg1(void, desc, sel("setDepthAttachmentPixelFormat:"), @as(u64, metal_context.MTLPixelFormat.Depth32Float));
+
+    // Configure vertex descriptor for grid (only position - float3)
+    const vertex_desc_class = getClass("MTLVertexDescriptor") orelse {
+        logger.err("Failed to get MTLVertexDescriptor class", .{});
+        release(desc);
+        return false;
+    };
+
+    const vertex_desc_alloc = msg(?*anyopaque, vertex_desc_class, sel("alloc"));
+    const vertex_desc = msg(?*anyopaque, vertex_desc_alloc, sel("init"));
+    if (vertex_desc == null) {
+        release(desc);
+        return false;
+    }
+
+    // Position attribute (location 0)
+    // Use buffer index 30 to avoid conflict with Camera uniform at buffer(0)
+    const attributes = msg(?*anyopaque, vertex_desc, sel("attributes"));
+    if (attributes) |attrs| {
+        const pos_attr = msg1(?*anyopaque, attrs, sel("objectAtIndexedSubscript:"), @as(u64, 0));
+        if (pos_attr) |attr| {
+            _ = msg1(void, attr, sel("setFormat:"), @as(u64, metal_context.MTLVertexFormat.Float3));
+            _ = msg1(void, attr, sel("setOffset:"), @as(u64, 0));
+            _ = msg1(void, attr, sel("setBufferIndex:"), @as(u64, 30));
+        }
+    }
+
+    // Layout for buffer 30 (vertex buffer)
+    const layouts = msg(?*anyopaque, vertex_desc, sel("layouts"));
+    if (layouts) |lyt| {
+        const buffer_layout = msg1(?*anyopaque, lyt, sel("objectAtIndexedSubscript:"), @as(u64, 30));
+        if (buffer_layout) |layout| {
+            _ = msg1(void, layout, sel("setStride:"), @as(u64, @sizeOf([3]f32)));
+            _ = msg1(void, layout, sel("setStepFunction:"), @as(u64, metal_context.MTLVertexStepFunction.PerVertex));
+        }
+    }
+
+    _ = msg1(void, desc, sel("setVertexDescriptor:"), vertex_desc);
+
+    // Create pipeline state
+    var error_ptr: ?*anyopaque = null;
+    const pipeline_state = msg2(
+        ?*anyopaque,
+        device,
+        sel("newRenderPipelineStateWithDescriptor:error:"),
+        desc,
+        &error_ptr,
+    );
+
+    release(vertex_desc);
+    release(desc);
+
+    if (pipeline_state == null) {
+        if (error_ptr) |err| {
+            const err_desc = msg(?*anyopaque, err, sel("localizedDescription"));
+            if (err_desc) |d| {
+                const c_str = msg([*:0]const u8, d, sel("UTF8String"));
+                logger.err("Grid pipeline creation failed: {s}", .{c_str});
+            }
+        } else {
+            logger.err("Grid pipeline creation failed: unknown error", .{});
+        }
+        return false;
+    }
+
+    // Create depth stencil state (depth test enabled, depth write disabled)
+    const depth_stencil_state = createGridDepthStencilState(device) orelse {
+        logger.err("Failed to create grid depth stencil state", .{});
+        release(pipeline_state);
+        return false;
+    };
+
+    logger.info("Grid shader pipeline created.", .{});
+
+    pipeline.* = MetalPipeline{
+        .state = pipeline_state,
+        .depth_stencil_state = depth_stencil_state,
+    };
+
+    return true;
+}
+
+/// Create depth stencil state for grid (depth test enabled, write disabled)
+fn createGridDepthStencilState(device: ?*anyopaque) ?*anyopaque {
+    const desc_class = getClass("MTLDepthStencilDescriptor") orelse return null;
+    const desc_alloc = msg(?*anyopaque, desc_class, sel("alloc"));
+    if (desc_alloc == null) return null;
+
+    const desc = msg(?*anyopaque, desc_alloc, sel("init"));
+    if (desc == null) return null;
+
+    // Enable depth test but disable depth write
+    _ = msg1(void, desc, sel("setDepthCompareFunction:"), @as(u64, metal_context.MTLCompareFunction.LessEqual));
+    _ = msg1(void, desc, sel("setDepthWriteEnabled:"), @as(i8, 0)); // No depth write
+
+    const depth_stencil_state = msg1(?*anyopaque, device, sel("newDepthStencilStateWithDescriptor:"), desc);
+
+    release(desc);
+
+    return depth_stencil_state;
+}

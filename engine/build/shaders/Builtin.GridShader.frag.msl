@@ -1,0 +1,70 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct Grid
+{
+    float camera_pos_x;
+    float camera_pos_y;
+    float camera_pos_z;
+    float grid_height;
+    float minor_spacing;
+    float major_spacing;
+    float fade_distance;
+    float _pad0;
+    float4 minor_color;
+    float4 major_color;
+    float4 axis_x_color;
+    float4 axis_z_color;
+};
+
+struct main0_out
+{
+    float4 out_color [[color(0)]];
+};
+
+struct main0_in
+{
+    float3 v_world_pos [[user(locn0)]];
+};
+
+static inline __attribute__((always_inline))
+float grid_mask(thread const float2& pos, thread const float& spacing)
+{
+    float2 cell = pos / float2(spacing);
+    float2 dist = abs(fract(cell + float2(0.5)) - float2(0.5));
+    float line_dist = fast::min(dist.x, dist.y);
+    float fw = fwidth(line_dist);
+    return 1.0 - smoothstep(fw * 0.5, fw * 1.5, line_dist);
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant Grid& grid [[buffer(0)]])
+{
+    main0_out out = {};
+    float2 grid_pos = in.v_world_pos.xz;
+    float2 param = grid_pos;
+    float param_1 = grid.minor_spacing;
+    float minor = grid_mask(param, param_1);
+    float2 param_2 = grid_pos;
+    float param_3 = grid.major_spacing;
+    float major = grid_mask(param_2, param_3);
+    float fw_x = fwidth(grid_pos.x);
+    float fw_y = fwidth(grid_pos.y);
+    float axis_x_line = 1.0 - smoothstep(fw_y * 0.5, fw_y * 1.5, abs(grid_pos.y));
+    float axis_z_line = 1.0 - smoothstep(fw_x * 0.5, fw_x * 1.5, abs(grid_pos.x));
+    float4 color = float4(0.0);
+    color = mix(color, grid.minor_color, float4(minor));
+    color = mix(color, grid.major_color, float4(major));
+    color = mix(color, grid.axis_x_color, float4(axis_x_line));
+    color = mix(color, grid.axis_z_color, float4(axis_z_line));
+    float3 camera_pos = float3(grid.camera_pos_x, grid.camera_pos_y, grid.camera_pos_z);
+    float dist = length(in.v_world_pos - camera_pos);
+    float fade = fast::clamp(1.0 - (dist / grid.fade_distance), 0.0, 1.0);
+    color.w *= fade;
+    out.out_color = color;
+    return out;
+}
+

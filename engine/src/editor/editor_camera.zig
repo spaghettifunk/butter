@@ -19,7 +19,7 @@ pub const EditorCamera = struct {
 
     // Euler angles (in degrees, like LearnOpenGL)
     yaw: f32 = -90.0, // Yaw of -90 means looking along -Z axis
-    pitch: f32 = 0.0,
+    pitch: f32 = -30.0, // Look down at the grid (negative pitch = look down)
 
     // Movement settings
     move_speed: f32 = 10.0,
@@ -34,6 +34,13 @@ pub const EditorCamera = struct {
     view_matrix_dirty: bool = true,
 
     const world_up: [3]f32 = .{ 0, 1, 0 };
+
+    /// Initialize the editor camera with correct vectors
+    pub fn init() EditorCamera {
+        var camera = EditorCamera{};
+        camera.updateVectors(); // Initialize front/right/up vectors based on yaw/pitch
+        return camera;
+    }
 
     /// Update camera based on input
     pub fn update(self: *EditorCamera, delta_time: f32) void {

@@ -264,6 +264,14 @@ pub const VulkanBackend = struct {
             return false;
         }
 
+        // Initialize grid rendering (editor only)
+        if (build_options.enable_editor) {
+            if (!self.initializeGrid()) {
+                logger.err("Failed to initialize grid rendering.", .{});
+                return false;
+            }
+        }
+
         // Create default texture (white 1x1 texture)
         if (!self.createDefaultTexture()) {
             logger.err("Failed to create default texture.", .{});
@@ -285,6 +293,11 @@ pub const VulkanBackend = struct {
 
         // Destroy default texture
         texture.destroy(&self.context, &self.context.default_texture);
+
+        // Destroy grid resources (editor only)
+        if (build_options.enable_editor) {
+            self.cleanupGrid();
+        }
 
         // Destroy graphics pipeline
         pipeline.destroyMaterialPipeline(&self.context, &self.context.material_shader);
@@ -487,6 +500,9 @@ pub const VulkanBackend = struct {
         const current_frame = self.context.current_frame;
 
         const cmd_buffer = &self.context.graphics_command_buffers[image_index];
+
+        // Grid is now rendered via render graph (see renderGridPass callback)
+        // Removed duplicate renderGridDirect call that was causing double rendering
 
         // End the renderpass - this transitions the image to PRESENT_SRC layout
         renderpass.end(&self.context.main_renderpass, cmd_buffer.handle);
@@ -1209,6 +1225,381 @@ pub const VulkanBackend = struct {
         // Cast draw_data with proper alignment and command buffer to imgui's type
         const imgui_draw_data: *imgui_vulkan.ImDrawData = @ptrCast(@alignCast(draw_data));
         imgui_vulkan.cImGui_ImplVulkan_RenderDrawData(imgui_draw_data, @ptrCast(cmd_buf));
+    }
+
+    // =========================================================================
+    // Grid Rendering Functions (Editor Only)
+    // =========================================================================
+
+    /// Initialize grid rendering resources
+    fn initializeGrid(self: *VulkanBackend) bool {
+        logger.debug("Initializing grid rendering...", .{});
+
+        // Load grid shaders
+        if (!self.loadGridShaders()) {
+            logger.err("Failed to load grid shaders.", .{});
+            return false;
+        }
+
+        // Create grid descriptor layout and pool
+        if (!descriptor.createGridLayout(&self.context, &self.context.grid_descriptor_state)) {
+            logger.err("Failed to create grid descriptor layout.", .{});
+            return false;
+        }
+
+        const frame_count = self.context.swapchain.max_frames_in_flight;
+        if (!descriptor.createGridPool(&self.context, &self.context.grid_descriptor_state, frame_count)) {
+            descriptor.destroyGridLayout(&self.context, &self.context.grid_descriptor_state);
+            return false;
+        }
+
+        if (!descriptor.allocateGridSets(&self.context, &self.context.grid_descriptor_state, frame_count)) {
+            descriptor.destroyGridPool(&self.context, &self.context.grid_descriptor_state);
+            descriptor.destroyGridLayout(&self.context, &self.context.grid_descriptor_state);
+            return false;
+        }
+
+        // Create grid pipeline
+        if (!pipeline.createGridPipeline(
+            &self.context,
+            &self.context.grid_shader,
+            self.context.grid_descriptor_state.layout,
+            self.context.main_renderpass.handle,
+        )) {
+            descriptor.destroyGridPool(&self.context, &self.context.grid_descriptor_state);
+            descriptor.destroyGridLayout(&self.context, &self.context.grid_descriptor_state);
+            return false;
+        }
+
+        // Create grid uniform buffers
+        if (!self.createGridUniformBuffers()) {
+            pipeline.destroyGridShader(&self.context, &self.context.grid_shader);
+            descriptor.destroyGridPool(&self.context, &self.context.grid_descriptor_state);
+            descriptor.destroyGridLayout(&self.context, &self.context.grid_descriptor_state);
+            return false;
+        }
+
+        // Create grid geometry
+        if (!self.createGridGeometry()) {
+            self.cleanupGridBuffers();
+            pipeline.destroyGridShader(&self.context, &self.context.grid_shader);
+            descriptor.destroyGridPool(&self.context, &self.context.grid_descriptor_state);
+            descriptor.destroyGridLayout(&self.context, &self.context.grid_descriptor_state);
+            return false;
+        }
+
+        logger.info("Grid rendering initialized.", .{});
+        return true;
+    }
+
+    /// Cleanup grid resources
+    fn cleanupGrid(self: *VulkanBackend) void {
+        // Destroy geometry buffers
+        buffer.destroy(&self.context, &self.context.grid_geometry_vertex_buffer);
+        buffer.destroy(&self.context, &self.context.grid_geometry_index_buffer);
+
+        // Destroy uniform buffers
+        self.cleanupGridBuffers();
+
+        // Destroy descriptor state
+        descriptor.destroyGridPool(&self.context, &self.context.grid_descriptor_state);
+        descriptor.destroyGridLayout(&self.context, &self.context.grid_descriptor_state);
+
+        // Destroy pipeline and shaders
+        pipeline.destroyGridShader(&self.context, &self.context.grid_shader);
+    }
+
+    /// Load grid shaders
+    fn loadGridShaders(self: *VulkanBackend) bool {
+        logger.debug("Loading grid shaders...", .{});
+
+        const allocator = std.heap.page_allocator;
+
+        // Load vertex shader
+        if (!shader.load(
+            &self.context,
+            allocator,
+            "build/shaders/Builtin.GridShader.vert.spv",
+            .vertex,
+            &self.context.grid_shader.vertex_shader,
+        )) {
+            logger.err("Failed to load grid vertex shader.", .{});
+            return false;
+        }
+
+        // Load fragment shader
+        if (!shader.load(
+            &self.context,
+            allocator,
+            "build/shaders/Builtin.GridShader.frag.spv",
+            .fragment,
+            &self.context.grid_shader.fragment_shader,
+        )) {
+            logger.err("Failed to load grid fragment shader.", .{});
+            shader.destroy(&self.context, &self.context.grid_shader.vertex_shader);
+            return false;
+        }
+
+        logger.info("Grid shaders loaded.", .{});
+        return true;
+    }
+
+    /// Create grid uniform buffers
+    fn createGridUniformBuffers(self: *VulkanBackend) bool {
+        const frame_count = self.context.swapchain.max_frames_in_flight;
+
+        // Create camera uniform buffers (one per frame)
+        for (0..frame_count) |i| {
+            if (!buffer.create(
+                &self.context,
+                &self.context.grid_camera_buffers[i],
+                @sizeOf(renderer.GridCameraUBO),
+                buffer.BufferUsage.uniform,
+                buffer.MemoryFlags.host_visible,
+            )) {
+                logger.err("Failed to create grid camera uniform buffer {}", .{i});
+                return false;
+            }
+        }
+
+        // Create grid UBO buffers (one per frame)
+        for (0..frame_count) |i| {
+            if (!buffer.create(
+                &self.context,
+                &self.context.grid_ubo_buffers[i],
+                @sizeOf(renderer.GridUBO),
+                buffer.BufferUsage.uniform,
+                buffer.MemoryFlags.host_visible,
+            )) {
+                logger.err("Failed to create grid UBO buffer {}", .{i});
+                return false;
+            }
+
+            // Upload default grid configuration
+            var grid_ubo = renderer.GridUBO.initDefault();
+            _ = buffer.loadData(
+                &self.context,
+                &self.context.grid_ubo_buffers[i],
+                0,
+                @sizeOf(renderer.GridUBO),
+                &grid_ubo,
+            );
+        }
+
+        // Update descriptor sets
+        for (0..frame_count) |i| {
+            descriptor.updateGridSet(
+                &self.context,
+                &self.context.grid_descriptor_state,
+                @intCast(i),
+                self.context.grid_camera_buffers[i].handle,
+                self.context.grid_ubo_buffers[i].handle,
+            );
+        }
+
+        logger.debug("Grid uniform buffers created.", .{});
+        return true;
+    }
+
+    /// Cleanup grid buffers
+    fn cleanupGridBuffers(self: *VulkanBackend) void {
+        const frame_count = self.context.swapchain.max_frames_in_flight;
+        for (0..frame_count) |i| {
+            buffer.destroy(&self.context, &self.context.grid_camera_buffers[i]);
+            buffer.destroy(&self.context, &self.context.grid_ubo_buffers[i]);
+        }
+    }
+
+    /// Create grid geometry (1000x1000 quad)
+    fn createGridGeometry(self: *VulkanBackend) bool {
+        // Temporarily use smaller grid for debugging visibility
+        const grid_size: f32 = 2000.0; // Increased from 1000 to ensure it's visible
+        const half_size = grid_size / 2.0;
+
+        // Vertex positions (simple quad in XZ plane)
+        const vertices = [_][3]f32{
+            .{ -half_size, 0.0, -half_size }, // Bottom-left
+            .{ half_size, 0.0, -half_size }, // Bottom-right
+            .{ half_size, 0.0, half_size }, // Top-right
+            .{ -half_size, 0.0, half_size }, // Top-left
+        };
+
+        // Indices for two triangles
+        const indices = [_]u32{ 0, 1, 2, 0, 2, 3 };
+
+        self.context.grid_geometry_vertex_count = vertices.len;
+        self.context.grid_geometry_index_count = indices.len;
+
+        // Create vertex buffer (use host-visible memory for simplicity - grid is small and static)
+        const vertex_buffer_size = @sizeOf([3]f32) * vertices.len;
+        if (!buffer.create(
+            &self.context,
+            &self.context.grid_geometry_vertex_buffer,
+            vertex_buffer_size,
+            vk.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            buffer.MemoryFlags.host_visible,
+        )) {
+            logger.err("Failed to create grid vertex buffer", .{});
+            return false;
+        }
+
+        // Upload vertex data directly to host-visible buffer
+        _ = buffer.loadData(
+            &self.context,
+            &self.context.grid_geometry_vertex_buffer,
+            0,
+            vertex_buffer_size,
+            &vertices,
+        );
+
+        // Create index buffer (use host-visible memory for simplicity)
+        const index_buffer_size = @sizeOf(u32) * indices.len;
+        if (!buffer.create(
+            &self.context,
+            &self.context.grid_geometry_index_buffer,
+            index_buffer_size,
+            vk.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            buffer.MemoryFlags.host_visible,
+        )) {
+            logger.err("Failed to create grid index buffer", .{});
+            buffer.destroy(&self.context, &self.context.grid_geometry_vertex_buffer);
+            return false;
+        }
+
+        // Upload index data directly to host-visible buffer
+        _ = buffer.loadData(
+            &self.context,
+            &self.context.grid_geometry_index_buffer,
+            0,
+            index_buffer_size,
+            &indices,
+        );
+
+        logger.debug("Grid geometry created ({}x{} units).", .{ grid_size, grid_size });
+        return true;
+    }
+
+    /// Render pass callback for grid rendering
+    pub fn renderGridPass(pass_context: *const @import("../render_graph/executor.zig").RenderPassContext) void {
+        // Get the backend pointer from user_data
+        const backend_ptr: *VulkanBackend = @ptrCast(@alignCast(pass_context.pass.user_data.?));
+        const cmd = backend_ptr.context.graphics_command_buffers[backend_ptr.context.image_index].handle;
+        const current_frame = backend_ptr.context.current_frame;
+
+        // Update camera UBO with current view-projection matrix
+        if (renderer.getSystem()) |sys| {
+            // FIXED: Use view * projection order to match rest of codebase (see editor.zig:339)
+            const view_proj = math.mat4Mul(sys.view, sys.projection);
+            var camera_ubo = renderer.GridCameraUBO.init();
+            camera_ubo.view_proj = view_proj;
+
+            _ = buffer.loadData(
+                &backend_ptr.context,
+                &backend_ptr.context.grid_camera_buffers[current_frame],
+                0,
+                @sizeOf(renderer.GridCameraUBO),
+                &camera_ubo,
+            );
+
+            // Update grid UBO with camera position for fade
+            var grid_ubo = renderer.GridUBO.initDefault();
+            grid_ubo.camera_pos_x = sys.camera_position[0];
+            grid_ubo.camera_pos_y = sys.camera_position[1];
+            grid_ubo.camera_pos_z = sys.camera_position[2];
+
+            _ = buffer.loadData(
+                &backend_ptr.context,
+                &backend_ptr.context.grid_ubo_buffers[current_frame],
+                0,
+                @sizeOf(renderer.GridUBO),
+                &grid_ubo,
+            );
+        }
+
+        // Bind grid pipeline
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, backend_ptr.context.grid_shader.pipeline.handle);
+
+        // Bind descriptor set
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            backend_ptr.context.grid_shader.pipeline.layout,
+            0,
+            1,
+            &backend_ptr.context.grid_descriptor_state.sets[current_frame],
+            0,
+            null,
+        );
+
+        // Bind vertex buffer
+        const vertex_buffers = [1]vk.VkBuffer{backend_ptr.context.grid_geometry_vertex_buffer.handle};
+        const offsets = [1]vk.VkDeviceSize{0};
+        vk.vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffers, &offsets);
+
+        // Bind index buffer
+        vk.vkCmdBindIndexBuffer(cmd, backend_ptr.context.grid_geometry_index_buffer.handle, 0, vk.VK_INDEX_TYPE_UINT32);
+
+        // Draw indexed
+        vk.vkCmdDrawIndexed(cmd, backend_ptr.context.grid_geometry_index_count, 1, 0, 0, 0);
+    }
+
+    /// Render grid directly (called from endFrame, inside render pass)
+    fn renderGridDirect(self: *VulkanBackend, cmd: vk.VkCommandBuffer, current_frame: u32) void {
+        // Update camera UBO with current view-projection matrix
+        if (renderer.getSystem()) |sys| {
+            // FIXED: Use view * projection order to match rest of codebase (see editor.zig:339)
+            const view_proj = math.mat4Mul(sys.view, sys.projection);
+            var camera_ubo = renderer.GridCameraUBO.init();
+            camera_ubo.view_proj = view_proj;
+
+            _ = buffer.loadData(
+                &self.context,
+                &self.context.grid_camera_buffers[current_frame],
+                0,
+                @sizeOf(renderer.GridCameraUBO),
+                &camera_ubo,
+            );
+
+            // Update grid UBO with camera position for fade
+            var grid_ubo = renderer.GridUBO.initDefault();
+            grid_ubo.camera_pos_x = sys.camera_position[0];
+            grid_ubo.camera_pos_y = sys.camera_position[1];
+            grid_ubo.camera_pos_z = sys.camera_position[2];
+
+            _ = buffer.loadData(
+                &self.context,
+                &self.context.grid_ubo_buffers[current_frame],
+                0,
+                @sizeOf(renderer.GridUBO),
+                &grid_ubo,
+            );
+        }
+
+        // Bind grid pipeline
+        vk.vkCmdBindPipeline(cmd, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.context.grid_shader.pipeline.handle);
+
+        // Bind descriptor set
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            self.context.grid_shader.pipeline.layout,
+            0,
+            1,
+            &self.context.grid_descriptor_state.sets[current_frame],
+            0,
+            null,
+        );
+
+        // Bind vertex buffer
+        const vertex_buffers = [1]vk.VkBuffer{self.context.grid_geometry_vertex_buffer.handle};
+        const offsets = [1]vk.VkDeviceSize{0};
+        vk.vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffers, &offsets);
+
+        // Bind index buffer
+        vk.vkCmdBindIndexBuffer(cmd, self.context.grid_geometry_index_buffer.handle, 0, vk.VK_INDEX_TYPE_UINT32);
+
+        // Draw indexed
+        vk.vkCmdDrawIndexed(cmd, self.context.grid_geometry_index_count, 1, 0, 0, 0);
     }
 };
 

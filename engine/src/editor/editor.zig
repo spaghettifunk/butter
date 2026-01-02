@@ -64,7 +64,7 @@ pub const EditorSystem = struct {
     // New editor systems
     // Note: editor_scene is heap-allocated to work across library boundaries
     var editor_scene_ptr: ?*EditorScene = null;
-    var editor_camera: EditorCamera = .{};
+    var editor_camera: EditorCamera = EditorCamera.init();
     var selection: Selection = .{};
 
     // Mouse click state for picking
@@ -522,7 +522,6 @@ pub const EditorSystem = struct {
     }
 
     // Command callback implementations
-
     fn openCommandPalette() void {
         command_palette.open();
     }

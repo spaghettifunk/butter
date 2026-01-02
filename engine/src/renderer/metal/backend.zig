@@ -65,6 +65,21 @@ pub const MetalBackend = struct {
     // Global uniform buffers (double-buffered)
     global_uniform_buffers: [metal_context.MAX_FRAMES_IN_FLIGHT]metal_buffer.MetalBuffer = [_]metal_buffer.MetalBuffer{.{}} ** metal_context.MAX_FRAMES_IN_FLIGHT,
 
+    // Grid shaders and pipeline (editor only)
+    grid_vertex_shader: metal_shader.MetalShaderModule = .{},
+    grid_fragment_shader: metal_shader.MetalShaderModule = .{},
+    grid_pipeline: metal_pipeline.MetalPipeline = .{},
+
+    // Grid uniform buffers (double-buffered)
+    grid_camera_buffers: [metal_context.MAX_FRAMES_IN_FLIGHT]metal_buffer.MetalBuffer = [_]metal_buffer.MetalBuffer{.{}} ** metal_context.MAX_FRAMES_IN_FLIGHT,
+    grid_ubo_buffers: [metal_context.MAX_FRAMES_IN_FLIGHT]metal_buffer.MetalBuffer = [_]metal_buffer.MetalBuffer{.{}} ** metal_context.MAX_FRAMES_IN_FLIGHT,
+
+    // Grid geometry
+    grid_geometry_vertex_buffer: metal_buffer.MetalBuffer = .{},
+    grid_geometry_index_buffer: metal_buffer.MetalBuffer = .{},
+    grid_geometry_vertex_count: u32 = 0,
+    grid_geometry_index_count: u32 = 0,
+
     // Default texture
     default_texture: metal_texture.MetalTexture = .{},
 
@@ -131,6 +146,14 @@ pub const MetalBackend = struct {
             logger.warn("Failed to create default texture.", .{});
         }
 
+        // Initialize grid rendering (editor only)
+        if (build_options.enable_editor) {
+            if (!self.initializeGrid()) {
+                logger.err("Failed to initialize grid rendering.", .{});
+                return false;
+            }
+        }
+
         logger.info("Metal renderer initialized successfully.", .{});
         return true;
     }
@@ -147,6 +170,11 @@ pub const MetalBackend = struct {
 
         // Release default texture
         metal_texture.destroy(&self.default_texture);
+
+        // Destroy grid resources (editor only)
+        if (build_options.enable_editor) {
+            self.cleanupGrid();
+        }
 
         // Release uniform buffers
         for (&self.global_uniform_buffers) |*buf| {
@@ -782,6 +810,261 @@ pub const MetalBackend = struct {
         const encoder = self.context.current_render_encoder orelse return;
 
         imgui_metal.cImGui_ImplMetal_RenderDrawData(draw_data, command_buffer, encoder);
+    }
+
+    // =========================================================================
+    // Grid Rendering Functions (Editor Only)
+    // =========================================================================
+
+    /// Initialize grid rendering resources
+    fn initializeGrid(self: *MetalBackend) bool {
+        logger.debug("Initializing grid rendering (Metal)...", .{});
+
+        // Load grid shaders
+        if (!self.loadGridShaders()) {
+            logger.err("Failed to load grid shaders.", .{});
+            return false;
+        }
+
+        // Create grid pipeline
+        if (!self.createGridPipeline()) {
+            logger.err("Failed to create grid pipeline.", .{});
+            metal_shader.destroy(&self.grid_vertex_shader);
+            metal_shader.destroy(&self.grid_fragment_shader);
+            return false;
+        }
+
+        // Create grid uniform buffers
+        if (!self.createGridUniformBuffers()) {
+            logger.err("Failed to create grid uniform buffers.", .{});
+            metal_pipeline.destroy(&self.context, &self.grid_pipeline);
+            metal_shader.destroy(&self.grid_vertex_shader);
+            metal_shader.destroy(&self.grid_fragment_shader);
+            return false;
+        }
+
+        // Create grid geometry
+        if (!self.createGridGeometry()) {
+            logger.err("Failed to create grid geometry.", .{});
+            self.cleanupGridBuffers();
+            metal_pipeline.destroy(&self.context, &self.grid_pipeline);
+            metal_shader.destroy(&self.grid_vertex_shader);
+            metal_shader.destroy(&self.grid_fragment_shader);
+            return false;
+        }
+
+        logger.info("Grid rendering initialized (Metal).", .{});
+        return true;
+    }
+
+    /// Cleanup grid resources
+    fn cleanupGrid(self: *MetalBackend) void {
+        // Destroy geometry buffers
+        metal_buffer.destroy(&self.grid_geometry_vertex_buffer);
+        metal_buffer.destroy(&self.grid_geometry_index_buffer);
+
+        // Destroy uniform buffers
+        self.cleanupGridBuffers();
+
+        // Destroy pipeline and shaders
+        metal_pipeline.destroy(&self.context, &self.grid_pipeline);
+        metal_shader.destroy(&self.grid_vertex_shader);
+        metal_shader.destroy(&self.grid_fragment_shader);
+    }
+
+    /// Load grid shaders
+    fn loadGridShaders(self: *MetalBackend) bool {
+        logger.debug("Loading grid shaders (Metal)...", .{});
+
+        // Load vertex shader
+        logger.debug("Attempting to load: build/shaders/Builtin.GridShader.vert.msl", .{});
+        const vertex_module = metal_shader.loadFromMSL(
+            &self.context,
+            "build/shaders/Builtin.GridShader.vert.msl",
+            "main0",
+        ) orelse {
+            logger.err("Failed to load grid vertex shader from build/shaders/Builtin.GridShader.vert.msl", .{});
+            return false;
+        };
+        self.context.grid_vertex_shader = vertex_module.function;
+        logger.debug("Grid vertex shader loaded, function ptr: {*}", .{vertex_module.function});
+
+        // Load fragment shader
+        const fragment_module = metal_shader.loadFromMSL(
+            &self.context,
+            "build/shaders/Builtin.GridShader.frag.msl",
+            "main0",
+        ) orelse {
+            logger.err("Failed to load grid fragment shader.", .{});
+            metal_context.release(self.context.grid_vertex_shader);
+            return false;
+        };
+        self.context.grid_fragment_shader = fragment_module.function;
+
+        logger.info("Grid shaders loaded (Metal).", .{});
+        return true;
+    }
+
+    /// Create grid pipeline
+    fn createGridPipeline(self: *MetalBackend) bool {
+        // Create pipeline with grid shaders
+        // Note: We need to configure blending, depth testing similar to Vulkan
+        if (!metal_pipeline.createGridPipeline(
+            &self.context,
+            self.context.grid_vertex_shader,
+            self.context.grid_fragment_shader,
+            &self.context.grid_pipeline,
+        )) {
+            logger.err("Failed to create grid pipeline.", .{});
+            return false;
+        }
+
+        logger.debug("Grid pipeline created (Metal).", .{});
+        return true;
+    }
+
+    /// Create grid uniform buffers
+    fn createGridUniformBuffers(self: *MetalBackend) bool {
+        // Create camera uniform buffers (one per frame)
+        for (&self.context.grid_camera_buffers) |*buf| {
+            buf.* = metal_buffer.createEmpty(&self.context, @sizeOf(renderer.GridCameraUBO));
+            if (buf.handle == null) {
+                logger.err("Failed to create grid camera uniform buffer", .{});
+                return false;
+            }
+        }
+
+        // Create grid UBO buffers (one per frame)
+        for (&self.context.grid_ubo_buffers) |*buf| {
+            buf.* = metal_buffer.createEmpty(&self.context, @sizeOf(renderer.GridUBO));
+            if (buf.handle == null) {
+                logger.err("Failed to create grid UBO buffer", .{});
+                return false;
+            }
+
+            // Upload default grid configuration
+            const grid_ubo = renderer.GridUBO.initDefault();
+            metal_buffer.update(buf, 0, @sizeOf(renderer.GridUBO), &grid_ubo);
+        }
+
+        logger.debug("Grid uniform buffers created (Metal).", .{});
+        return true;
+    }
+
+    /// Cleanup grid buffers
+    fn cleanupGridBuffers(self: *MetalBackend) void {
+        for (&self.context.grid_camera_buffers) |*buf| {
+            metal_buffer.destroy(buf);
+        }
+        for (&self.context.grid_ubo_buffers) |*buf| {
+            metal_buffer.destroy(buf);
+        }
+    }
+
+    /// Create grid geometry (1000x1000 quad)
+    fn createGridGeometry(self: *MetalBackend) bool {
+        const grid_size: f32 = 1000.0;
+        const half_size = grid_size / 2.0;
+
+        // Vertex positions (simple quad in XZ plane)
+        const vertices = [_][3]f32{
+            .{ -half_size, 0.0, -half_size }, // Bottom-left
+            .{ half_size, 0.0, -half_size }, // Bottom-right
+            .{ half_size, 0.0, half_size }, // Top-right
+            .{ -half_size, 0.0, half_size }, // Top-left
+        };
+
+        // Indices for two triangles
+        const indices = [_]u32{ 0, 1, 2, 0, 2, 3 };
+
+        self.context.grid_geometry_vertex_count = @intCast(vertices.len);
+        self.context.grid_geometry_index_count = @intCast(indices.len);
+
+        // Create vertex buffer
+        const vertex_buffer_size = @sizeOf([3]f32) * vertices.len;
+        self.context.grid_geometry_vertex_buffer = metal_buffer.create(&self.context, vertex_buffer_size, &vertices);
+        if (self.context.grid_geometry_vertex_buffer.handle == null) {
+            logger.err("Failed to create grid vertex buffer", .{});
+            return false;
+        }
+
+        // Create index buffer
+        const index_buffer_size = @sizeOf(u32) * indices.len;
+        self.context.grid_geometry_index_buffer = metal_buffer.create(&self.context, index_buffer_size, &indices);
+        if (self.context.grid_geometry_index_buffer.handle == null) {
+            logger.err("Failed to create grid index buffer", .{});
+            metal_buffer.destroy(&self.context.grid_geometry_vertex_buffer);
+            return false;
+        }
+
+        logger.debug("Grid geometry created ({}x{} units, Metal).", .{ grid_size, grid_size });
+        return true;
+    }
+
+    /// Render pass callback for grid rendering
+    pub fn renderGridPass(pass_context: *const @import("../render_graph/executor.zig").RenderPassContext) void {
+        // Get the backend pointer from user_data
+        const backend_ptr: *MetalBackend = @ptrCast(@alignCast(pass_context.pass.user_data.?));
+        const encoder = backend_ptr.context.current_render_encoder orelse return;
+        const frame_index = backend_ptr.context.frame_index;
+
+        // Update camera UBO with current view-projection matrix
+        if (renderer.getSystem()) |sys| {
+            // FIXED: Use view * projection order to match Vulkan backend
+            const view_proj = math.mat4Mul(sys.view, sys.projection);
+            var camera_ubo = renderer.GridCameraUBO.init();
+            camera_ubo.view_proj = view_proj;
+
+            metal_buffer.update(
+                &backend_ptr.context.grid_camera_buffers[frame_index],
+                0,
+                @sizeOf(renderer.GridCameraUBO),
+                &camera_ubo,
+            );
+
+            // Update grid UBO with camera position for fade
+            var grid_ubo = renderer.GridUBO.initDefault();
+            grid_ubo.camera_pos_x = sys.camera_position[0];
+            grid_ubo.camera_pos_y = sys.camera_position[1];
+            grid_ubo.camera_pos_z = sys.camera_position[2];
+
+            metal_buffer.update(
+                &backend_ptr.context.grid_ubo_buffers[frame_index],
+                0,
+                @sizeOf(renderer.GridUBO),
+                &grid_ubo,
+            );
+        }
+
+        // Set pipeline state
+        _ = msg1(void, encoder, sel("setRenderPipelineState:"), backend_ptr.context.grid_pipeline.state);
+
+        // Set depth stencil state
+        _ = msg1(void, encoder, sel("setDepthStencilState:"), backend_ptr.context.grid_pipeline.depth_stencil_state);
+
+        // Set culling (none)
+        _ = msg1(void, encoder, sel("setCullMode:"), @as(u64, metal_context.MTLCullMode.None));
+
+        // Bind vertex buffer at index 30 (to avoid conflict with Camera uniform at buffer(0))
+        _ = msg3(void, encoder, sel("setVertexBuffer:offset:atIndex:"), backend_ptr.context.grid_geometry_vertex_buffer.handle, @as(u64, 0), @as(u64, 30));
+
+        // Bind camera UBO at index 0 (matches [[buffer(0)]] in vertex shader)
+        _ = msg3(void, encoder, sel("setVertexBuffer:offset:atIndex:"), backend_ptr.context.grid_camera_buffers[frame_index].handle, @as(u64, 0), @as(u64, 0));
+
+        // Bind grid UBO at index 0 in fragment shader (matches [[buffer(0)]] in fragment shader)
+        _ = msg3(void, encoder, sel("setFragmentBuffer:offset:atIndex:"), backend_ptr.context.grid_ubo_buffers[frame_index].handle, @as(u64, 0), @as(u64, 0));
+
+        // Draw indexed
+        _ = msg5(
+            void,
+            encoder,
+            sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"),
+            @as(u64, metal_context.MTLPrimitiveType.Triangle),
+            @as(u64, backend_ptr.context.grid_geometry_index_count),
+            @as(u64, metal_context.MTLIndexType.UInt32),
+            backend_ptr.context.grid_geometry_index_buffer.handle,
+            @as(u64, 0),
+        );
     }
 };
 
