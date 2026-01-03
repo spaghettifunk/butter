@@ -6,19 +6,24 @@ layout(set = 0, binding = 0) uniform GlobalUBO {
     mat4 projection;
     mat4 view;
 
-    // Shadow mapping matrices (128 bytes)
-    mat4 light_space_matrix;
-    mat4 shadow_projection;
-
     // Camera data (16 bytes)
     vec3 camera_position;
     float _pad0;
 
-    // Light data (32 bytes)
-    vec3 light_direction;
-    float light_intensity;
-    vec3 light_color;
-    float shadow_map_size;
+    // Directional light (32 bytes)
+    vec3 dir_light_direction;
+    float dir_light_intensity;
+    vec3 dir_light_color;
+    float dir_light_enabled;
+
+    // Point light count (16 bytes, vec4 aligned)
+    uint point_light_count;
+    float _pad_lights1;
+    float _pad_lights2;
+    float _pad_lights3;
+
+    // Point lights array (8 lights * 32 bytes = 256 bytes)
+    vec4 point_lights[16]; // Each light uses 2 vec4s: [pos.xyz, range], [color.rgb, intensity]
 
     // Screen/viewport data (16 bytes)
     vec2 screen_size;
@@ -35,7 +40,8 @@ layout(set = 0, binding = 0) uniform GlobalUBO {
     vec4 ambient_color;
 } ubo;
 
-layout(set = 0, binding = 1) uniform sampler2D tex_sampler;
+layout(set = 0, binding = 1) uniform sampler2D diffuse_sampler;
+layout(set = 0, binding = 2) uniform sampler2D specular_sampler;
 
 layout(location = 0) in vec4 frag_color;
 layout(location = 1) in vec2 frag_texcoord;
@@ -44,27 +50,94 @@ layout(location = 3) in vec3 frag_pos;
 
 layout(location = 0) out vec4 out_color;
 
-void main() {
-    vec4 tex_color = texture(tex_sampler, frag_texcoord);
-    
-    // Ambient component
-    vec3 ambient = ubo.ambient_color.rgb * ubo.ambient_color.a;
-    
-    // Diffuse component
-    vec3 norm = normalize(frag_normal);
-    // Light direction is direction of rays, so we need vector pointing TO light source
-    vec3 light_dir = normalize(-ubo.light_direction);
-    float diff = max(dot(norm, light_dir), 0.0);
-    vec3 diffuse = diff * ubo.light_color * ubo.light_intensity;
-    
-    // Specular component (Blinn-Phong)
-    vec3 view_dir = normalize(ubo.camera_position - frag_pos);
+// Calculate lighting from point light
+vec3 calculatePointLight(vec3 position, float range, vec3 color, float intensity,
+                         vec3 normal, vec3 frag_pos, vec3 view_dir,
+                         vec3 specular_color, float shininess) {
+    vec3 light_dir = position - frag_pos;
+    float distance = length(light_dir);
+    light_dir = normalize(light_dir);
+
+    // Attenuation (inverse square with range limit)
+    float attenuation = 1.0 / (1.0 + distance * distance);
+    attenuation *= smoothstep(range, range * 0.5, distance);
+
+    // Diffuse
+    float diff = max(dot(normal, light_dir), 0.0);
+    vec3 diffuse = diff * color * intensity * attenuation;
+
+    // Specular (Blinn-Phong)
     vec3 halfway_dir = normalize(light_dir + view_dir);
-    float spec = pow(max(dot(norm, halfway_dir), 0.0), 32.0); // Hardcoded shininess for now
-    vec3 specular = vec3(0.5) * spec * ubo.light_intensity; // Hardcoded specular color
-    
-    // Combine results
-    vec3 result = (ambient + diffuse + specular) * tex_color.rgb * frag_color.rgb;
-    
-    out_color = vec4(result, tex_color.a * frag_color.a);
+    float spec = pow(max(dot(normal, halfway_dir), 0.0), shininess);
+    vec3 specular = specular_color * spec * intensity * attenuation;
+
+    return diffuse + specular;
+}
+
+// Calculate lighting from directional light
+vec3 calculateDirectionalLight(vec3 direction, vec3 color, float intensity,
+                                vec3 normal, vec3 view_dir,
+                                vec3 specular_color, float shininess) {
+    vec3 light_dir = normalize(-direction);
+
+    // Diffuse
+    float diff = max(dot(normal, light_dir), 0.0);
+    vec3 diffuse = diff * color * intensity;
+
+    // Specular (Blinn-Phong)
+    vec3 halfway_dir = normalize(light_dir + view_dir);
+    float spec = pow(max(dot(normal, halfway_dir), 0.0), shininess);
+    vec3 specular = specular_color * spec * intensity;
+
+    return diffuse + specular;
+}
+
+void main() {
+    vec4 diffuse_tex = texture(diffuse_sampler, frag_texcoord);
+    vec4 specular_tex = texture(specular_sampler, frag_texcoord);
+
+    vec3 specular_color = specular_tex.rgb;
+    float shininess = specular_tex.a * 128.0; // Map 0-1 to 0-128
+    if (shininess < 1.0) shininess = 32.0; // Default if no specular map
+
+    vec3 normal = normalize(frag_normal);
+    vec3 view_dir = normalize(ubo.camera_position - frag_pos);
+
+    // Ambient
+    vec3 ambient = ubo.ambient_color.rgb * ubo.ambient_color.a;
+
+    // Accumulate lighting
+    vec3 lighting = vec3(0.0);
+
+    // Directional light
+    if (ubo.dir_light_enabled > 0.5) {
+        lighting += calculateDirectionalLight(
+            ubo.dir_light_direction,
+            ubo.dir_light_color,
+            ubo.dir_light_intensity,
+            normal, view_dir,
+            specular_color, shininess
+        );
+    }
+
+    // Point lights
+    for (uint i = 0u; i < ubo.point_light_count && i < 8u; i++) {
+        uint idx = i * 2u;
+        vec3 position = ubo.point_lights[idx].xyz;
+        float range = ubo.point_lights[idx].w;
+        vec3 color = ubo.point_lights[idx + 1u].xyz;
+        float intensity = ubo.point_lights[idx + 1u].w;
+
+        if (intensity > 0.0) {
+            lighting += calculatePointLight(
+                position, range, color, intensity,
+                normal, frag_pos, view_dir,
+                specular_color, shininess
+            );
+        }
+    }
+
+    // Final color
+    vec3 result = (ambient + lighting) * diffuse_tex.rgb * frag_color.rgb;
+    out_color = vec4(result, diffuse_tex.a * frag_color.a);
 }

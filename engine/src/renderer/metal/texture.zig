@@ -206,6 +206,33 @@ pub fn bind(encoder: ?*anyopaque, texture: *const MetalTexture) void {
     }
 }
 
+pub fn bindSpecular(encoder: ?*anyopaque, texture: *const MetalTexture) void {
+    const enc = encoder orelse return;
+    const msg2 = metal_context.msgSend2;
+
+    if (texture.handle) |tex| {
+        // setFragmentTexture:atIndex:
+        _ = msg2(
+            void,
+            enc,
+            sel("setFragmentTexture:atIndex:"),
+            tex,
+            @as(u64, 1), // Texture index 1 (specular)
+        );
+    }
+
+    if (texture.sampler) |sampler| {
+        // setFragmentSamplerState:atIndex:
+        _ = msg2(
+            void,
+            enc,
+            sel("setFragmentSamplerState:atIndex:"),
+            sampler,
+            @as(u64, 1), // Sampler index 1
+        );
+    }
+}
+
 /// Check if texture is valid
 pub fn isValid(texture: *const MetalTexture) bool {
     return texture.handle != null;

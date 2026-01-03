@@ -709,3 +709,74 @@ pub inline fn degToRad(deg: f32) f32 {
 pub inline fn radToDeg(rad: f32) f32 {
     return rad * 180.0 / std.math.pi;
 }
+
+// -------------------------------------------------
+// Direction <-> Euler Angle Conversion
+// -------------------------------------------------
+
+/// Convert a direction vector to Euler angles (in degrees)
+/// Uses YXZ rotation order to match engine convention
+/// Returns pitch (X), yaw (Y), roll (Z=0)
+pub fn directionToEuler(direction: [3]f32) [3]f32 {
+    // Normalize direction
+    var dir_vec = Vec3{ .elements = direction };
+    vec3Normalize(&dir_vec);
+    const d = dir_vec.elements;
+
+    // Calculate horizontal distance (xz plane projection)
+    const xz_len = @sqrt(d[0] * d[0] + d[2] * d[2]);
+
+    // Handle singularity when looking straight up or down
+    const epsilon: f32 = 0.001;
+    if (xz_len < epsilon) {
+        // Looking straight up or down - yaw is undefined, use 0 as convention
+        const pitch_singular: f32 = if (d[1] < 0) 90.0 else -90.0;
+        return .{ pitch_singular, 0.0, 0.0 };
+    }
+
+    // Calculate pitch (rotation around X axis)
+    // pitch = atan2(-dy, sqrt(dx² + dz²))
+    const pitch = std.math.atan2(-d[1], xz_len);
+
+    // Calculate yaw (rotation around Y axis)
+    // yaw = atan2(dx, dz)
+    const yaw = std.math.atan2(d[0], d[2]);
+
+    // Roll is always 0 for direction vectors (no twist component)
+    const roll: f32 = 0.0;
+
+    // Convert to degrees
+    return .{
+        pitch * K_RAD2DEG_MULTIPLIER,
+        yaw * K_RAD2DEG_MULTIPLIER,
+        roll,
+    };
+}
+
+/// Convert Euler angles (in degrees) to a direction vector
+/// Uses YXZ rotation order to match engine convention
+/// Returns normalized direction vector
+pub fn eulerToDirection(euler: [3]f32) [3]f32 {
+    // Convert to radians
+    const pitch = euler[0] * K_DEG2RAD_MULTIPLIER;
+    const yaw = euler[1] * K_DEG2RAD_MULTIPLIER;
+    // Ignore roll (euler[2]) for direction vectors
+
+    // Calculate direction components
+    const cos_pitch = bcos(pitch);
+    const sin_pitch = bsin(pitch);
+    const cos_yaw = bcos(yaw);
+    const sin_yaw = bsin(yaw);
+
+    // Direction = (sin_yaw * cos_pitch, -sin_pitch, cos_yaw * cos_pitch)
+    const direction = [3]f32{
+        sin_yaw * cos_pitch,
+        -sin_pitch,
+        cos_yaw * cos_pitch,
+    };
+
+    // Normalize to ensure unit vector
+    var dir_vec = Vec3{ .elements = direction };
+    vec3Normalize(&dir_vec);
+    return dir_vec.elements;
+}

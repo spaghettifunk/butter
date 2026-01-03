@@ -1,3 +1,5 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
 #include <metal_stdlib>
 #include <simd/simd.h>
 
@@ -7,14 +9,17 @@ struct GlobalUBO
 {
     float4x4 projection;
     float4x4 view;
-    float4x4 light_space_matrix;
-    float4x4 shadow_projection;
     packed_float3 camera_position;
     float _pad0;
-    packed_float3 light_direction;
-    float light_intensity;
-    packed_float3 light_color;
-    float shadow_map_size;
+    packed_float3 dir_light_direction;
+    float dir_light_intensity;
+    packed_float3 dir_light_color;
+    float dir_light_enabled;
+    uint point_light_count;
+    float _pad_lights1;
+    float _pad_lights2;
+    float _pad_lights3;
+    float4 point_lights[16];
     float2 screen_size;
     float near_plane;
     float far_plane;
@@ -38,21 +43,83 @@ struct main0_in
     float3 frag_pos [[user(locn3)]];
 };
 
-fragment main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buffer(0)]], texture2d<float> tex_sampler [[texture(0)]], sampler tex_samplerSmplr [[sampler(0)]])
+static inline __attribute__((always_inline))
+float3 calculateDirectionalLight(thread const float3& direction, thread const float3& color, thread const float& intensity, thread const float3& normal, thread const float3& view_dir, thread const float3& specular_color, thread const float& shininess)
+{
+    float3 light_dir = fast::normalize(-direction);
+    float diff = fast::max(dot(normal, light_dir), 0.0);
+    float3 diffuse = (color * diff) * intensity;
+    float3 halfway_dir = fast::normalize(light_dir + view_dir);
+    float spec = powr(fast::max(dot(normal, halfway_dir), 0.0), shininess);
+    float3 specular = (specular_color * spec) * intensity;
+    return diffuse + specular;
+}
+
+static inline __attribute__((always_inline))
+float3 calculatePointLight(thread const float3& position, thread const float& range, thread const float3& color, thread const float& intensity, thread const float3& normal, thread const float3& frag_pos, thread const float3& view_dir, thread const float3& specular_color, thread const float& shininess)
+{
+    float3 light_dir = position - frag_pos;
+    float _distance = length(light_dir);
+    light_dir = fast::normalize(light_dir);
+    float attenuation = 1.0 / (1.0 + (_distance * _distance));
+    attenuation *= smoothstep(range, range * 0.5, _distance);
+    float diff = fast::max(dot(normal, light_dir), 0.0);
+    float3 diffuse = ((color * diff) * intensity) * attenuation;
+    float3 halfway_dir = fast::normalize(light_dir + view_dir);
+    float spec = powr(fast::max(dot(normal, halfway_dir), 0.0), shininess);
+    float3 specular = ((specular_color * spec) * intensity) * attenuation;
+    return diffuse + specular;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buffer(0)]], texture2d<float> diffuse_sampler [[texture(0)]], texture2d<float> specular_sampler [[texture(1)]], sampler diffuse_samplerSmplr [[sampler(0)]], sampler specular_samplerSmplr [[sampler(1)]])
 {
     main0_out out = {};
-    float4 tex_color = tex_sampler.sample(tex_samplerSmplr, in.frag_texcoord);
-    float3 ambient = ubo.ambient_color.xyz * ubo.ambient_color.w;
-    float3 norm = fast::normalize(in.frag_normal);
-    float3 light_dir = fast::normalize(-float3(ubo.light_direction));
-    float diff = fast::max(dot(norm, light_dir), 0.0);
-    float3 diffuse = (float3(ubo.light_color) * diff) * ubo.light_intensity;
+    float4 diffuse_tex = diffuse_sampler.sample(diffuse_samplerSmplr, in.frag_texcoord);
+    float4 specular_tex = specular_sampler.sample(specular_samplerSmplr, in.frag_texcoord);
+    float3 specular_color = specular_tex.xyz;
+    float shininess = specular_tex.w * 128.0;
+    if (shininess < 1.0)
+    {
+        shininess = 32.0;
+    }
+    float3 normal = fast::normalize(in.frag_normal);
     float3 view_dir = fast::normalize(float3(ubo.camera_position) - in.frag_pos);
-    float3 halfway_dir = fast::normalize(light_dir + view_dir);
-    float spec = powr(fast::max(dot(norm, halfway_dir), 0.0), 32.0);
-    float3 specular = (float3(0.5) * spec) * ubo.light_intensity;
-    float3 result = (((ambient + diffuse) + specular) * tex_color.xyz) * in.frag_color.xyz;
-    out.out_color = float4(result, tex_color.w * in.frag_color.w);
+    float3 ambient = ubo.ambient_color.xyz * ubo.ambient_color.w;
+    float3 lighting = float3(0.0);
+    if (ubo.dir_light_enabled > 0.5)
+    {
+        float3 param = float3(ubo.dir_light_direction);
+        float3 param_1 = float3(ubo.dir_light_color);
+        float param_2 = ubo.dir_light_intensity;
+        float3 param_3 = normal;
+        float3 param_4 = view_dir;
+        float3 param_5 = specular_color;
+        float param_6 = shininess;
+        lighting += calculateDirectionalLight(param, param_1, param_2, param_3, param_4, param_5, param_6);
+    }
+    for (uint i = 0u; (i < ubo.point_light_count) && (i < 8u); i++)
+    {
+        uint idx = i * 2u;
+        float3 position = ubo.point_lights[idx].xyz;
+        float range = ubo.point_lights[idx].w;
+        float3 color = ubo.point_lights[idx + 1u].xyz;
+        float intensity = ubo.point_lights[idx + 1u].w;
+        if (intensity > 0.0)
+        {
+            float3 param_7 = position;
+            float param_8 = range;
+            float3 param_9 = color;
+            float param_10 = intensity;
+            float3 param_11 = normal;
+            float3 param_12 = in.frag_pos;
+            float3 param_13 = view_dir;
+            float3 param_14 = specular_color;
+            float param_15 = shininess;
+            lighting += calculatePointLight(param_7, param_8, param_9, param_10, param_11, param_12, param_13, param_14, param_15);
+        }
+    }
+    float3 result = ((ambient + lighting) * diffuse_tex.xyz) * in.frag_color.xyz;
+    out.out_color = float4(result, diffuse_tex.w * in.frag_color.w);
     return out;
 }
 

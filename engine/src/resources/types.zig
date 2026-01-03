@@ -12,7 +12,11 @@ pub const Texture = struct {
     internal_data: ?*anyopaque,
 };
 
-pub const TextureUse = enum(u16) { TEXTURE_USE_UNKNOWN = 0x00, TEXTURE_USE_MAP_DIFFUSE = 0x01 };
+pub const TextureUse = enum(u16) {
+    TEXTURE_USE_UNKNOWN = 0x00,
+    TEXTURE_USE_MAP_DIFFUSE = 0x01,
+    TEXTURE_USE_MAP_SPECULAR = 0x02,
+};
 
 pub const TextureMap = struct {
     texture: *Texture,
@@ -28,4 +32,7 @@ pub const Material = struct {
     name: [MATERIAL_NAME_MAX_LENGTH]u8,
     diffuse_colour: math_types.Vec4,
     diffuse_map: TextureMap,
+    specular_map: TextureMap,
+    specular_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
+    shininess: f32 = 32.0,
 };

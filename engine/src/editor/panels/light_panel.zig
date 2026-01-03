@@ -6,6 +6,7 @@ const imgui = @import("../../systems/imgui.zig");
 const selection_mod = @import("../selection.zig");
 const renderer = @import("../../renderer/renderer.zig");
 const light_system = @import("../../systems/light.zig");
+const light_debug_viz = @import("../light_debug_viz.zig");
 
 const Selection = selection_mod.Selection;
 const LightType = light_system.LightType;
@@ -48,6 +49,11 @@ pub fn render(p_open: *bool) void {
             return;
         };
 
+        // Debug visualization toggle
+        _ = imgui.checkbox("Show Light Debug Visualization", &light_debug_viz.enabled);
+        imgui.separator();
+        imgui.spacing();
+
         // Light selection list
         imgui.text("Select Light:");
         if (imgui.beginChild("LightList", .{ .x = 0, .y = 100 }, imgui.ChildFlags.Border, 0)) {
@@ -84,6 +90,28 @@ pub fn render(p_open: *bool) void {
                     .point => .spot,
                     .spot => .directional,
                 };
+            }
+
+            imgui.spacing();
+
+            // Transform section
+            if (imgui.collapsingHeader("Transform")) {
+                imgui.text("Position");
+                _ = imgui.dragFloat3("##position", &light.position, 0.1);
+
+                imgui.text("Direction");
+                _ = imgui.dragFloat3("##direction", &light.direction, 0.01);
+                imgui.sameLine();
+                if (imgui.button("Normalize##dir")) {
+                    const len = @sqrt(light.direction[0] * light.direction[0] +
+                        light.direction[1] * light.direction[1] +
+                        light.direction[2] * light.direction[2]);
+                    if (len > 0.001) {
+                        light.direction[0] /= len;
+                        light.direction[1] /= len;
+                        light.direction[2] /= len;
+                    }
+                }
             }
 
             imgui.spacing();

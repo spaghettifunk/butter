@@ -2,23 +2,31 @@
 #extension GL_ARB_separate_shader_objects : enable
 
 layout(set = 0, binding = 0) uniform GlobalUBO {
-    // Matrices (128 bytes) - projection and view only, model moved to push constants
+    // Matrices (128 bytes)
     mat4 projection;
     mat4 view;
 
-    // Shadow mapping matrices (128 bytes)
-    mat4 light_space_matrix;
-    mat4 shadow_projection;
-
-    // Camera data (16 bytes, padded to vec4)
+    // Camera data (16 bytes)
     vec3 camera_position;
     float _pad0;
 
-    // Light data (32 bytes)
-    vec3 light_direction;
-    float light_intensity;
-    vec3 light_color;
-    float shadow_map_size;
+    // Directional light (32 bytes)
+    vec3 dir_light_direction;
+    float dir_light_intensity;
+    vec3 dir_light_color;
+    float dir_light_enabled;
+
+    // Point light 0 (32 bytes)
+    vec3 point_light_0_position;
+    float point_light_0_range;
+    vec3 point_light_0_color;
+    float point_light_0_intensity;
+
+    // Point light 1 (32 bytes)
+    vec3 point_light_1_position;
+    float point_light_1_range;
+    vec3 point_light_1_color;
+    float point_light_1_intensity;
 
     // Screen/viewport data (16 bytes)
     vec2 screen_size;

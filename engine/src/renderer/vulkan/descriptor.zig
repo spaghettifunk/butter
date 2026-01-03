@@ -46,7 +46,7 @@ pub fn createGlobalLayout(
     state: *MaterialShaderDescriptorState,
 ) bool {
     // Descriptor set bindings
-    var layout_bindings: [2]vk.VkDescriptorSetLayoutBinding = .{
+    var layout_bindings: [3]vk.VkDescriptorSetLayoutBinding = .{
         // Global UBO binding: set 0, binding 0
         .{
             .binding = 0,
@@ -55,9 +55,17 @@ pub fn createGlobalLayout(
             .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = null,
         },
-        // Texture sampler binding: set 0, binding 1
+        // Diffuse texture sampler binding: set 0, binding 1
         .{
             .binding = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Specular texture sampler binding: set 0, binding 2
+        .{
+            .binding = 2,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -116,7 +124,7 @@ pub fn createPool(
         },
         .{
             .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = max_sets,
+            .descriptorCount = max_sets * 2, // diffuse + specular per set
         },
     };
 
@@ -266,6 +274,47 @@ pub fn updateTextureSet(
         .pNext = null,
         .dstSet = state.global_sets[set_index],
         .dstBinding = 1,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &image_info,
+        .pBufferInfo = null,
+        .pTexelBufferView = null,
+    };
+
+    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
+}
+
+/// Update a descriptor set with a specular texture (binding 2)
+pub fn updateSpecularTextureSet(
+    context: *vk_context.VulkanContext,
+    state: *MaterialShaderDescriptorState,
+    set_index: u32,
+    texture: *const resource_types.Texture,
+) void {
+    if (set_index >= MAX_DESCRIPTOR_SETS) {
+        logger.err("Invalid descriptor set index: {}", .{set_index});
+        return;
+    }
+
+    if (texture.internal_data == null) {
+        logger.err("Texture has no internal data", .{});
+        return;
+    }
+
+    const internal_data: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(texture.internal_data.?));
+
+    var image_info: vk.VkDescriptorImageInfo = .{
+        .sampler = internal_data.sampler,
+        .imageView = internal_data.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var write: vk.VkWriteDescriptorSet = .{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = null,
+        .dstSet = state.global_sets[set_index],
+        .dstBinding = 2, // Specular texture binding
         .dstArrayElement = 0,
         .descriptorCount = 1,
         .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,

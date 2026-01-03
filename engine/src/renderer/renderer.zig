@@ -37,25 +37,31 @@ pub const RenderPacket = struct {
 /// Global uniform buffer object containing frame-wide rendering data.
 /// This is the shared UBO structure used by all backends.
 /// Layout matches std140 for GLSL/MSL compatibility.
-/// Total size: 352 bytes (extended for shadow mapping)
+/// Total size: 496 bytes (128 mat + 16 cam + 32 dirlight + 16 count + 256 lights + 16 screen + 16 time + 16 ambient)
 pub const GlobalUBO = extern struct {
     // Matrices (128 bytes) - projection and view only, model moved to push constants
     projection: math_types.Mat4,
     view: math_types.Mat4,
 
-    // Shadow mapping matrices (128 bytes)
-    light_space_matrix: math_types.Mat4,
-    shadow_projection: math_types.Mat4,
-
     // Camera data (16 bytes, padded to vec4)
     camera_position: [3]f32 = .{ 0, 0, 0 },
     _pad0: f32 = 0,
 
-    // Light data (32 bytes)
-    light_direction: [3]f32 = .{ 0.5, -1.0, 0.3 },
-    light_intensity: f32 = 1.0,
-    light_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
-    shadow_map_size: f32 = 2048.0,
+    // Directional light (32 bytes)
+    dir_light_direction: [3]f32 = .{ 0.5, -1.0, 0.3 },
+    dir_light_intensity: f32 = 1.0,
+    dir_light_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
+    dir_light_enabled: f32 = 1.0, // 1.0 = enabled, 0.0 = disabled
+
+    // Point light count (16 bytes, vec4 aligned)
+    point_light_count: u32 = 0,
+    _pad_lights1: f32 = 0,
+    _pad_lights2: f32 = 0,
+    _pad_lights3: f32 = 0,
+
+    // Point lights array (8 lights * 32 bytes = 256 bytes)
+    // Each light uses 2 vec4s: [pos.xyz, range], [color.rgb, intensity]
+    point_lights: [16][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** 16,
 
     // Screen/viewport data (16 bytes)
     screen_size: [2]f32 = .{ 1280, 720 },
@@ -76,8 +82,6 @@ pub const GlobalUBO = extern struct {
         return GlobalUBO{
             .projection = math.mat4Identity(),
             .view = math.mat4Identity(),
-            .light_space_matrix = math.mat4Identity(),
-            .shadow_projection = math.mat4Identity(),
         };
     }
 };
@@ -88,20 +92,20 @@ pub const GlobalUBO = extern struct {
 /// across Vulkan (std140) and Metal (packed) backends.
 /// Total size: 96 bytes
 pub const GridUBO = extern struct {
-    camera_pos_x: f32,       // offset 0
-    camera_pos_y: f32,       // offset 4
-    camera_pos_z: f32,       // offset 8
-    grid_height: f32,        // offset 12
+    camera_pos_x: f32, // offset 0
+    camera_pos_y: f32, // offset 4
+    camera_pos_z: f32, // offset 8
+    grid_height: f32, // offset 12
 
-    minor_spacing: f32,      // offset 16
-    major_spacing: f32,      // offset 20
-    fade_distance: f32,      // offset 24
-    _pad0: f32,              // offset 28 - padding before vec4s
+    minor_spacing: f32, // offset 16
+    major_spacing: f32, // offset 20
+    fade_distance: f32, // offset 24
+    _pad0: f32, // offset 28 - padding before vec4s
 
-    minor_color: [4]f32,     // offset 32
-    major_color: [4]f32,     // offset 48
-    axis_x_color: [4]f32,    // offset 64
-    axis_z_color: [4]f32,    // offset 80
+    minor_color: [4]f32, // offset 32
+    major_color: [4]f32, // offset 48
+    axis_x_color: [4]f32, // offset 64
+    axis_z_color: [4]f32, // offset 80
 
     pub fn initDefault() GridUBO {
         return GridUBO{
@@ -114,8 +118,8 @@ pub const GridUBO = extern struct {
             .fade_distance = 500.0, // Increased from 100 to reduce fading
             ._pad0 = 0,
             // Grid lines in black, axes in color
-            .minor_color = .{ 0.0, 0.0, 0.0, 1.0 },  // Black
-            .major_color = .{ 0.0, 0.0, 0.0, 1.0 },  // Black
+            .minor_color = .{ 0.0, 0.0, 0.0, 1.0 }, // Black
+            .major_color = .{ 0.0, 0.0, 0.0, 1.0 }, // Black
             .axis_x_color = .{ 1.0, 0.0, 0.0, 1.0 }, // Red for X axis
             .axis_z_color = .{ 0.0, 0.0, 1.0, 1.0 }, // Blue for Z axis
         };
@@ -216,6 +220,14 @@ pub const Backend = union(BackendType) {
         switch (self.*) {
             .vulkan => |*v| v.bindTexture(texture),
             .metal => |*m| m.bindTexture(texture),
+            else => {},
+        }
+    }
+
+    pub fn bindSpecularTexture(self: *Backend, texture: ?*const resource_types.Texture) void {
+        switch (self.*) {
+            .vulkan => |*v| v.bindSpecularTexture(texture),
+            .metal => |*m| m.bindSpecularTexture(texture),
             else => {},
         }
     }
@@ -427,11 +439,47 @@ pub const RendererSystem = struct {
         // Update light data from light system
         if (self.light_system) |*ls| {
             ubo.ambient_color = ls.ambient_color;
-            if (ls.getMainLight()) |main_light| {
-                ubo.light_direction = main_light.direction;
-                ubo.light_color = main_light.color;
-                ubo.light_intensity = main_light.intensity;
+
+            // Reset light states
+            ubo.dir_light_enabled = 0.0;
+            ubo.point_light_count = 0;
+
+            var point_light_count: u32 = 0;
+
+            for (ls.lights.items) |*lght| {
+                if (!lght.enabled) continue;
+
+                switch (lght.type) {
+                    .directional => {
+                        if (ubo.dir_light_enabled < 0.5) { // First directional only
+                            ubo.dir_light_direction = lght.direction;
+                            ubo.dir_light_color = lght.color;
+                            ubo.dir_light_intensity = lght.intensity;
+                            ubo.dir_light_enabled = 1.0;
+                        }
+                    },
+                    .point => {
+                        if (point_light_count < 8) { // Support up to 8 point lights
+                            const idx = point_light_count * 2;
+                            // First vec4: position.xyz and range
+                            ubo.point_lights[idx][0] = lght.position[0];
+                            ubo.point_lights[idx][1] = lght.position[1];
+                            ubo.point_lights[idx][2] = lght.position[2];
+                            ubo.point_lights[idx][3] = lght.range;
+                            // Second vec4: color.rgb and intensity
+                            ubo.point_lights[idx + 1][0] = lght.color[0];
+                            ubo.point_lights[idx + 1][1] = lght.color[1];
+                            ubo.point_lights[idx + 1][2] = lght.color[2];
+                            ubo.point_lights[idx + 1][3] = lght.intensity;
+
+                            point_light_count += 1;
+                        }
+                    },
+                    .spot => {}, // Not implemented yet
+                }
             }
+
+            ubo.point_light_count = point_light_count;
         }
 
         self.backend.updateUBO(&ubo);
@@ -495,6 +543,11 @@ pub const RendererSystem = struct {
     /// Bind a texture for rendering. Pass null to use the default white texture.
     pub fn bindTexture(self: *RendererSystem, texture: ?*const resource_types.Texture) void {
         self.backend.bindTexture(texture);
+    }
+
+    /// Bind a specular texture for rendering
+    pub fn bindSpecularTexture(self: *RendererSystem, texture: ?*const resource_types.Texture) void {
+        self.backend.bindSpecularTexture(texture);
     }
 
     /// Draw geometry using its GPU buffers with a model matrix

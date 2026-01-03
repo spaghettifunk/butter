@@ -447,6 +447,19 @@ pub const MetalBackend = struct {
         metal_texture.bind(encoder, tex);
     }
 
+    pub fn bindSpecularTexture(self: *MetalBackend, texture: ?*const resource_types.Texture) void {
+        const encoder = self.context.current_render_encoder orelse return;
+
+        const tex = if (texture) |t| blk: {
+            if (t.internal_data) |data| {
+                break :blk @as(*const metal_texture.MetalTexture, @ptrCast(@alignCast(data)));
+            }
+            break :blk &self.default_texture;
+        } else &self.default_texture;
+
+        metal_texture.bindSpecular(encoder, tex);
+    }
+
     /// Draw geometry using its GPU buffers with a model matrix
     pub fn drawGeometry(self: *MetalBackend, geo: *const geometry_types.Geometry, model_matrix: *const math_types.Mat4) void {
         const encoder = self.context.current_render_encoder orelse return;

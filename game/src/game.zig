@@ -157,6 +157,57 @@ fn initializeTestScene(state: *GameState) void {
     }
 
     engine.logger.info("Test scene initialized with {d} objects", .{scene.getObjectCount()});
+
+    // Add additional lights with different colors for testing color blending
+    if (renderer.getSystem()) |render_sys| {
+        if (render_sys.light_system) |*light_sys| {
+            // Add a red point light on the left
+            _ = light_sys.createLight(.{
+                .type = .point,
+                .position = .{ -3.0, 2.0, 2.0 },
+                .color = .{ 1.0, 0.0, 0.0 }, // Red
+                .intensity = 1.5,
+                .range = 8.0,
+            }) catch |err| {
+                engine.logger.warn("Failed to create red point light: {}", .{err});
+            };
+
+            // Add a green point light on the right
+            _ = light_sys.createLight(.{
+                .type = .point,
+                .position = .{ 3.0, 2.0, 2.0 },
+                .color = .{ 0.0, 1.0, 0.0 }, // Green
+                .intensity = 1.5,
+                .range = 8.0,
+            }) catch |err| {
+                engine.logger.warn("Failed to create green point light: {}", .{err});
+            };
+
+            // Add a blue point light in the back
+            _ = light_sys.createLight(.{
+                .type = .point,
+                .position = .{ 0.0, 2.0, -3.0 },
+                .color = .{ 0.0, 0.3, 1.0 }, // Blue
+                .intensity = 1.5,
+                .range = 8.0,
+            }) catch |err| {
+                engine.logger.warn("Failed to create blue point light: {}", .{err});
+            };
+
+            // Add a warm point light above
+            _ = light_sys.createLight(.{
+                .type = .point,
+                .position = .{ 0.0, 4.0, 0.0 },
+                .color = .{ 1.0, 0.8, 0.4 }, // Warm white/orange
+                .intensity = 1.2,
+                .range = 10.0,
+            }) catch |err| {
+                engine.logger.warn("Failed to create warm point light: {}", .{err});
+            };
+
+            engine.logger.info("Added {d} colored point lights to the scene", .{4});
+        }
+    }
 }
 
 fn render(game: *Game, dt: f64) bool {

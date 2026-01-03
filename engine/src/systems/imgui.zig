@@ -590,6 +590,11 @@ pub fn drawListAddCircleEx(draw_list: *c.ImDrawList, center: ImVec2, radius: f32
     c.ImDrawList_AddCircleEx(draw_list, center, radius, col, num_segments, thickness);
 }
 
+/// Add filled circle
+pub fn drawListAddCircleFilled(draw_list: *c.ImDrawList, center: ImVec2, radius: f32, col: u32, num_segments: c_int) void {
+    c.ImDrawList_AddCircleFilled(draw_list, center, radius, col, num_segments);
+}
+
 /// Add ellipse with rotation, segments and thickness
 pub fn drawListAddEllipseEx(draw_list: *c.ImDrawList, center: ImVec2, radius: ImVec2, col: u32, rot: f32, num_segments: c_int, thickness: f32) void {
     c.ImDrawList_AddEllipseEx(draw_list, center, radius, col, rot, num_segments, thickness);

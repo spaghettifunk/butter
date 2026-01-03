@@ -108,6 +108,7 @@ pub const VulkanContext = struct {
 
     // Currently bound texture per frame (to avoid redundant descriptor set updates)
     bound_texture_id: [swapchain.MAX_SWAPCHAIN_IMAGES]u32 = [_]u32{0xFFFFFFFF} ** swapchain.MAX_SWAPCHAIN_IMAGES,
+    bound_specular_texture_id: [swapchain.MAX_SWAPCHAIN_IMAGES]u32 = [_]u32{0xFFFFFFFF} ** swapchain.MAX_SWAPCHAIN_IMAGES,
 
     // Material shader and pipeline
     material_shader: pipeline.MaterialShader = .{},

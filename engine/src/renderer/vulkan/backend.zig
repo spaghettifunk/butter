@@ -631,6 +631,32 @@ pub const VulkanBackend = struct {
         }
     }
 
+    pub fn bindSpecularTexture(self: *VulkanBackend, tex: ?*const resource_types.Texture) void {
+        // If no texture provided, use default texture
+        const texture_to_bind = tex orelse texture_system.getDefaultTexture() orelse &self.context.default_texture;
+        const texture_id = texture_to_bind.id;
+
+        // Check if this specular texture is already bound
+        if (self.context.bound_specular_texture_id[0] == texture_id) {
+            return;
+        }
+
+        // Skip if frame is in progress (same logic as diffuse texture)
+        if (self.context.frame_in_progress) {
+            return;
+        }
+
+        // Wait for device and update descriptor sets
+        if (self.context.device != null) {
+            _ = vk.vkDeviceWaitIdle(self.context.device);
+        }
+        self.updateDescriptorSetsWithSpecularTexture(texture_to_bind);
+        // Mark all frames as having this specular texture bound
+        for (&self.context.bound_specular_texture_id) |*id| {
+            id.* = texture_id;
+        }
+    }
+
     /// Draw geometry using its GPU buffers with a model matrix
     pub fn drawGeometry(self: *VulkanBackend, geo: *const geometry_types.Geometry, model_matrix: *const math_types.Mat4) void {
         const gpu_data = geo.internal_data orelse return;
@@ -968,6 +994,17 @@ pub const VulkanBackend = struct {
     fn updateDescriptorSetsWithTexture(self: *VulkanBackend, tex: *const resource_types.Texture) void {
         for (0..self.context.swapchain.max_frames_in_flight) |i| {
             descriptor.updateTextureSet(
+                &self.context,
+                &self.context.descriptor_state,
+                @intCast(i),
+                tex,
+            );
+        }
+    }
+
+    fn updateDescriptorSetsWithSpecularTexture(self: *VulkanBackend, tex: *const resource_types.Texture) void {
+        for (0..self.context.swapchain.max_frames_in_flight) |i| {
+            descriptor.updateSpecularTextureSet(
                 &self.context,
                 &self.context.descriptor_state,
                 @intCast(i),

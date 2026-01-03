@@ -36,6 +36,7 @@ const EditorScene = @import("editor_scene.zig").EditorScene;
 const EditorCamera = @import("editor_camera.zig").EditorCamera;
 const Selection = @import("selection.zig").Selection;
 const picking = @import("picking.zig");
+const light_debug_viz = @import("light_debug_viz.zig");
 
 // Existing editor sub-modules
 pub const scene_editor = @import("scene_editor.zig");
@@ -66,6 +67,12 @@ pub const EditorSystem = struct {
     var editor_scene_ptr: ?*EditorScene = null;
     var editor_camera: EditorCamera = EditorCamera.init();
     var selection: Selection = .{};
+
+    // Cache gizmo transform state for lights (separate from Light data structure)
+    var light_gizmo_rotation: [3]f32 = .{ 0, 0, 0 }; // Euler angles in degrees
+    var light_gizmo_scale: [3]f32 = .{ 1, 1, 1 };
+    var cached_light_id: u32 = 0; // Track which light the cache is for
+    var cached_light_base_range: f32 = 10.0; // Original range when light selected
 
     // Mouse click state for picking
     var was_left_button_down: bool = false;
@@ -299,6 +306,18 @@ pub const EditorSystem = struct {
         // Overlays (drawn on top of everything)
         debug_overlay.render();
 
+        // Render light debug visualization (direction arrows, range spheres)
+        if (renderer.getSystem()) |render_sys| {
+            const io = imgui.getIO();
+            const view = editor_camera.getViewMatrix();
+            const proj = render_sys.projection;
+            const view_proj = math.mat4Mul(view, proj);
+            light_debug_viz.render(view_proj, io.*.DisplaySize.x, io.*.DisplaySize.y);
+        }
+
+        // Render light billboards (icons for lights in the scene)
+        renderLightBillboards();
+
         // Render gizmo and apply transform delta to selected object
         if (gizmo.render()) |delta| {
             applyGizmoDelta(delta);
@@ -311,12 +330,9 @@ pub const EditorSystem = struct {
 
         // Detect click (just pressed)
         if (is_left_down and !was_left_button_down) {
-            logger.debug("[PICKING] Left click detected", .{});
-
             const imgui_wants_mouse = imgui.ImGuiSystem.wantsCaptureMouse();
             const gizmo_active = gizmo.is_active;
             const gizmo_hovered = (gizmo.hovered_axis != gizmo_mod.Axis.none);
-            logger.debug("[PICKING] ImGui wants mouse: {}, Gizmo active: {}, Gizmo hovered: {}", .{ imgui_wants_mouse, gizmo_active, gizmo_hovered });
 
             // Don't pick if ImGui wants the mouse or gizmo is being manipulated or hovered
             if (!imgui_wants_mouse and !gizmo_active and !gizmo_hovered) {
@@ -332,48 +348,56 @@ pub const EditorSystem = struct {
 
                 logger.debug("[PICKING] Mouse pos: ({d:.1}, {d:.1}), Screen size: ({d:.1}, {d:.1})", .{ mx, my, sw, sh });
 
-                // Get inverse view-projection matrix
-                if (renderer.getSystem()) |render_sys| {
-                    const view = editor_camera.getViewMatrix();
-                    const proj = render_sys.projection;
-                    const view_proj = math.mat4Mul(view, proj);
-                    const inv_view_proj = math.mat4Inverse(view_proj);
-
-                    // Create picking ray
-                    const ray = picking.screenToRay(mx, my, sw, sh, inv_view_proj);
-
-                    logger.debug("[PICKING] Ray origin: ({d:.2}, {d:.2}, {d:.2}), dir: ({d:.2}, {d:.2}, {d:.2})", .{ ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2] });
-
-                    // Get scene from shared context
-                    logger.debug("[CONTEXT] Getting editor_scene from context: ctx={*}", .{engine_context.get()});
-                    const scene = engine_context.get().editor_scene orelse {
-                        logger.warn("[PICKING] No editor scene in context!", .{});
-                        return;
-                    };
-
-                    // Log scene objects for debugging
-                    logger.debug("[PICKING] editor_scene ptr={*}", .{scene});
-                    const objects = scene.getAllObjects();
-                    logger.debug("[PICKING] Scene has {} objects", .{objects.len});
-                    for (objects) |obj| {
-                        logger.debug("[PICKING]   Object {}: bounds min=({d:.2},{d:.2},{d:.2}) max=({d:.2},{d:.2},{d:.2})", .{ obj.id, obj.world_bounds_min[0], obj.world_bounds_min[1], obj.world_bounds_min[2], obj.world_bounds_max[0], obj.world_bounds_max[1], obj.world_bounds_max[2] });
-                    }
-
-                    // Pick object
-                    const picked_id = picking.pickObject(scene, ray);
-                    logger.debug("[PICKING] Picked object ID: {}", .{picked_id});
-
-                    if (picked_id != @import("editor_scene.zig").INVALID_OBJECT_ID) {
-                        selection.select(picked_id);
-                        gizmo.is_visible = true;
-                        show_gizmo_panel = true;
-                        logger.info("[PICKING] Selected object {}", .{picked_id});
-                    } else {
-                        selection.deselect();
-                        logger.debug("[PICKING] No object hit, deselected", .{});
-                    }
+                // First try to pick lights (they are rendered on top, so higher priority)
+                if (pickLight(mx, my)) |light_id| {
+                    selection.selectLight(light_id);
+                    gizmo.is_visible = true;
+                    show_light_panel = true;
+                    logger.info("[PICKING] Selected light {}", .{light_id});
                 } else {
-                    logger.warn("[PICKING] No renderer system available", .{});
+                    // Get inverse view-projection matrix for object picking
+                    if (renderer.getSystem()) |render_sys| {
+                        const view = editor_camera.getViewMatrix();
+                        const proj = render_sys.projection;
+                        const view_proj = math.mat4Mul(view, proj);
+                        const inv_view_proj = math.mat4Inverse(view_proj);
+
+                        // Create picking ray
+                        const ray = picking.screenToRay(mx, my, sw, sh, inv_view_proj);
+
+                        logger.debug("[PICKING] Ray origin: ({d:.2}, {d:.2}, {d:.2}), dir: ({d:.2}, {d:.2}, {d:.2})", .{ ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2] });
+
+                        // Get scene from shared context
+                        logger.debug("[CONTEXT] Getting editor_scene from context: ctx={*}", .{engine_context.get()});
+                        const scene = engine_context.get().editor_scene orelse {
+                            logger.warn("[PICKING] No editor scene in context!", .{});
+                            return;
+                        };
+
+                        // Log scene objects for debugging
+                        logger.debug("[PICKING] editor_scene ptr={*}", .{scene});
+                        const objects = scene.getAllObjects();
+                        logger.debug("[PICKING] Scene has {} objects", .{objects.len});
+                        for (objects) |obj| {
+                            logger.debug("[PICKING]   Object {}: bounds min=({d:.2},{d:.2},{d:.2}) max=({d:.2},{d:.2},{d:.2})", .{ obj.id, obj.world_bounds_min[0], obj.world_bounds_min[1], obj.world_bounds_min[2], obj.world_bounds_max[0], obj.world_bounds_max[1], obj.world_bounds_max[2] });
+                        }
+
+                        // Pick object
+                        const picked_id = picking.pickObject(scene, ray);
+                        logger.debug("[PICKING] Picked object ID: {}", .{picked_id});
+
+                        if (picked_id != @import("editor_scene.zig").INVALID_OBJECT_ID) {
+                            selection.select(picked_id);
+                            gizmo.is_visible = true;
+                            show_gizmo_panel = true;
+                            logger.info("[PICKING] Selected object {}", .{picked_id});
+                        } else {
+                            selection.deselect();
+                            logger.debug("[PICKING] No object hit, deselected", .{});
+                        }
+                    } else {
+                        logger.warn("[PICKING] No renderer system available", .{});
+                    }
                 }
             }
         }
@@ -381,10 +405,52 @@ pub const EditorSystem = struct {
         was_left_button_down = is_left_down;
     }
 
-    /// Update gizmo position from selected object
+    /// Update gizmo position from selected object or light
     fn updateGizmoFromSelection() void {
         const scene = engine_context.get().editor_scene orelse return;
 
+        // Check if a light is selected
+        if (selection.selected_light_id != 0) {
+            if (renderer.getSystem()) |render_sys| {
+                if (render_sys.light_system) |*ls| {
+                    if (ls.getLightById(selection.selected_light_id)) |light| {
+                        // Check if we switched to a different light
+                        if (cached_light_id != light.id) {
+                            // New light selected - initialize gizmo state from light data
+                            cached_light_id = light.id;
+
+                            // Convert direction to Euler angles for initial gizmo state
+                            light_gizmo_rotation = math.directionToEuler(light.direction);
+
+                            // Convert range to uniform scale representation
+                            // Handle zero or very small range
+                            if (light.range < 0.1) {
+                                cached_light_base_range = 10.0; // Use default
+                                light_gizmo_scale = .{ 0.01, 0.01, 0.01 };
+                            } else {
+                                cached_light_base_range = light.range;
+                                const scale_factor = light.range / 10.0; // Normalize to default range
+                                light_gizmo_scale = .{ scale_factor, scale_factor, scale_factor };
+                            }
+                        }
+
+                        // Set gizmo target with cached rotation/scale state
+                        gizmo.setTarget(light.position, light_gizmo_rotation, light_gizmo_scale);
+                        gizmo.is_visible = true;
+
+                        // Set up view-projection for world-space rendering
+                        const io = imgui.getIO();
+                        const view = editor_camera.getViewMatrix();
+                        const proj = render_sys.projection;
+                        const view_proj = math.mat4Mul(view, proj);
+                        gizmo.setViewProjection(view_proj, io.*.DisplaySize.x, io.*.DisplaySize.y);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Check if an object is selected
         if (selection.getSelected()) |selected_id| {
             if (scene.getObject(selected_id)) |obj| {
                 // Set gizmo target from object transform
@@ -406,16 +472,188 @@ pub const EditorSystem = struct {
                 gizmo.is_visible = false;
             }
         } else {
-            // No selection - disable gizmo
+            // No selection - disable gizmo and reset light cache
             gizmo.is_visible = false;
             gizmo.use_world_position = false;
+            cached_light_id = 0; // Reset cache on deselection
         }
     }
 
-    /// Apply gizmo transform delta to selected object
+    /// Pick a light based on screen coordinates
+    /// Returns the light ID if a light is within picking threshold, null otherwise
+    fn pickLight(mx: f32, my: f32) ?u32 {
+        const render_sys = renderer.getSystem() orelse return null;
+        const ls = if (render_sys.light_system) |*s| s else return null;
+
+        const io = imgui.getIO();
+        const display_size = io.*.DisplaySize;
+
+        // Get view-projection matrix
+        const view = editor_camera.getViewMatrix();
+        const proj = render_sys.projection;
+        const view_proj = math.mat4Mul(view, proj);
+
+        const threshold: f32 = 20.0; // Pick radius in pixels
+
+        // Check each light
+        for (ls.lights.items) |*light| {
+            if (!light.enabled) continue;
+
+            // Project light position to screen space
+            const screen_pos = worldToScreen(light.position, view_proj, display_size.x, display_size.y) orelse continue;
+
+            // Calculate distance from mouse to light icon
+            const dx = mx - screen_pos[0];
+            const dy = my - screen_pos[1];
+            const dist_sq = dx * dx + dy * dy;
+
+            // Check if within pick threshold
+            if (dist_sq < threshold * threshold) {
+                return light.id;
+            }
+        }
+
+        return null;
+    }
+
+    /// Render light billboards (camera-facing icons) in the viewport
+    fn renderLightBillboards() void {
+        const render_sys = renderer.getSystem() orelse return;
+        const ls = if (render_sys.light_system) |*s| s else return;
+
+        const draw_list = imgui.getForegroundDrawList();
+        const io = imgui.getIO();
+        const display_size = io.*.DisplaySize;
+
+        // Get view-projection matrix
+        const view = editor_camera.getViewMatrix();
+        const proj = render_sys.projection;
+        const view_proj = math.mat4Mul(view, proj);
+
+        // Render each light
+        for (ls.lights.items) |*light| {
+            if (!light.enabled) continue;
+
+            // Project light position to screen space
+            const screen_pos = worldToScreen(light.position, view_proj, display_size.x, display_size.y) orelse continue;
+
+            const is_selected = (selection.selected_light_id == light.id);
+
+            // Draw icon based on light type
+            switch (light.type) {
+                .directional => drawDirectionalLightIcon(draw_list, screen_pos, is_selected),
+                .point => drawPointLightIcon(draw_list, screen_pos, is_selected),
+                .spot => {}, // Not implemented yet
+            }
+        }
+    }
+
+    /// Helper function to project world position to screen coordinates
+    fn worldToScreen(world_pos: [3]f32, view_proj: math.Mat4, screen_width: f32, screen_height: f32) ?[2]f32 {
+        // Transform to clip space
+        const x = view_proj.data[0] * world_pos[0] + view_proj.data[4] * world_pos[1] + view_proj.data[8] * world_pos[2] + view_proj.data[12];
+        const y = view_proj.data[1] * world_pos[0] + view_proj.data[5] * world_pos[1] + view_proj.data[9] * world_pos[2] + view_proj.data[13];
+        const w = view_proj.data[3] * world_pos[0] + view_proj.data[7] * world_pos[1] + view_proj.data[11] * world_pos[2] + view_proj.data[15];
+
+        // Behind camera check
+        if (w <= 0.001) return null;
+
+        // Perspective divide to NDC
+        const ndc_x = x / w;
+        const ndc_y = y / w;
+
+        // Convert to screen coordinates
+        const screen_x = (ndc_x + 1.0) * 0.5 * screen_width;
+        const screen_y = (1.0 - ndc_y) * 0.5 * screen_height; // Flip Y
+
+        return .{ screen_x, screen_y };
+    }
+
+    /// Draw a directional light icon (sun with rays)
+    fn drawDirectionalLightIcon(draw_list: *imgui.ImDrawList, pos: [2]f32, selected: bool) void {
+        const radius: f32 = 16;
+        const color: u32 = if (selected) 0xFF00FFFF else 0xFFFFAA00; // Cyan if selected, orange otherwise
+
+        // Sun icon: circle with 8 rays
+        imgui.drawListAddCircleEx(draw_list, .{ .x = pos[0], .y = pos[1] }, radius, color, 32, 2.0);
+
+        // Rays
+        var i: usize = 0;
+        while (i < 8) : (i += 1) {
+            const angle = @as(f32, @floatFromInt(i)) * std.math.pi * 2.0 / 8.0;
+            const inner_r = radius + 4;
+            const outer_r = radius + 12;
+            const x1 = pos[0] + @cos(angle) * inner_r;
+            const y1 = pos[1] + @sin(angle) * inner_r;
+            const x2 = pos[0] + @cos(angle) * outer_r;
+            const y2 = pos[1] + @sin(angle) * outer_r;
+            imgui.drawListAddLineEx(draw_list, .{ .x = x1, .y = y1 }, .{ .x = x2, .y = y2 }, color, 2.0);
+        }
+    }
+
+    /// Draw a point light icon (light bulb with cross)
+    fn drawPointLightIcon(draw_list: *imgui.ImDrawList, pos: [2]f32, selected: bool) void {
+        const radius: f32 = 12;
+        const color: u32 = if (selected) 0xFF00FFFF else 0xFFFFFF00; // Cyan if selected, yellow otherwise
+
+        // Light bulb: filled circle with cross
+        imgui.drawListAddCircleFilled(draw_list, .{ .x = pos[0], .y = pos[1] }, radius, color, 32);
+
+        // Cross lines (dark for contrast)
+        const line_len: f32 = radius * 1.5;
+        const cross_color: u32 = 0xFF000000; // Black
+        imgui.drawListAddLineEx(draw_list, .{ .x = pos[0] - line_len, .y = pos[1] }, .{ .x = pos[0] + line_len, .y = pos[1] }, cross_color, 2.0);
+        imgui.drawListAddLineEx(draw_list, .{ .x = pos[0], .y = pos[1] - line_len }, .{ .x = pos[0], .y = pos[1] + line_len }, cross_color, 2.0);
+    }
+
+    /// Apply gizmo transform delta to selected object or light
     fn applyGizmoDelta(delta: TransformDelta) void {
         const scene = engine_context.get().editor_scene orelse return;
 
+        // Check if a light is selected
+        if (selection.selected_light_id != 0) {
+            if (renderer.getSystem()) |render_sys| {
+                if (render_sys.light_system) |*ls| {
+                    if (ls.getLightById(selection.selected_light_id)) |light| {
+                        // Apply position delta
+                        light.position[0] += delta.position[0];
+                        light.position[1] += delta.position[1];
+                        light.position[2] += delta.position[2];
+
+                        // Apply rotation delta to cached gizmo rotation
+                        if (delta.rotation[0] != 0.0 or delta.rotation[1] != 0.0 or delta.rotation[2] != 0.0) {
+                            // Update cached gizmo rotation (accumulate delta)
+                            light_gizmo_rotation[0] += delta.rotation[0];
+                            light_gizmo_rotation[1] += delta.rotation[1];
+                            light_gizmo_rotation[2] += delta.rotation[2];
+
+                            // Convert updated Euler angles back to direction vector
+                            light.direction = math.eulerToDirection(light_gizmo_rotation);
+                        }
+
+                        // Apply scale delta - for point/spot lights, affects range
+                        if (light.type == .point or light.type == .spot) {
+                            if (delta.scale[0] != 1.0 or delta.scale[1] != 1.0 or delta.scale[2] != 1.0) {
+                                // Update cached gizmo scale (multiplicative)
+                                light_gizmo_scale[0] *= delta.scale[0];
+                                light_gizmo_scale[1] *= delta.scale[1];
+                                light_gizmo_scale[2] *= delta.scale[2];
+
+                                // Convert uniform scale to range
+                                const avg_scale = (light_gizmo_scale[0] + light_gizmo_scale[1] + light_gizmo_scale[2]) / 3.0;
+                                light.range = cached_light_base_range * avg_scale;
+
+                                // Clamp range to reasonable values
+                                light.range = @max(0.1, @min(light.range, 100.0));
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // Apply to object
         if (selection.getSelected()) |selected_id| {
             if (scene.getObject(selected_id)) |obj| {
                 // Apply position delta

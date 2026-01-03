@@ -12,14 +12,20 @@ struct GlobalUBO
 {
     float4x4 projection;
     float4x4 view;
-    float4x4 light_space_matrix;
-    float4x4 shadow_projection;
     packed_float3 camera_position;
     float _pad0;
-    packed_float3 light_direction;
-    float light_intensity;
-    packed_float3 light_color;
-    float shadow_map_size;
+    packed_float3 dir_light_direction;
+    float dir_light_intensity;
+    packed_float3 dir_light_color;
+    float dir_light_enabled;
+    packed_float3 point_light_0_position;
+    float point_light_0_range;
+    packed_float3 point_light_0_color;
+    float point_light_0_intensity;
+    packed_float3 point_light_1_position;
+    float point_light_1_range;
+    packed_float3 point_light_1_color;
+    float point_light_1_intensity;
     float2 screen_size;
     float near_plane;
     float far_plane;

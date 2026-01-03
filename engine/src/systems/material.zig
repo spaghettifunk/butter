@@ -130,6 +130,9 @@ pub const MaterialConfig = struct {
     auto_release: bool,
     diffuse_colour: math_types.Vec4,
     diffuse_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8,
+    specular_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    specular_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
+    shininess: f32 = 32.0,
 
     // Multi-pass shader configuration
     pass_shaders: [MAX_MATERIAL_PASSES]PassShaderInfo = [_]PassShaderInfo{.{}} ** MAX_MATERIAL_PASSES,
@@ -167,6 +170,12 @@ pub const MaterialSystem = struct {
                         .texture = undefined,
                         .use = .TEXTURE_USE_UNKNOWN,
                     },
+                    .specular_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .specular_color = .{ 1.0, 1.0, 1.0 },
+                    .shininess = 32.0,
                 },
                 .name = null,
                 .ref_count = 0,
@@ -303,6 +312,26 @@ pub const MaterialSystem = struct {
             return null;
         }
 
+        // Load the specular texture
+        const specular_map_name = std.mem.sliceTo(&config.specular_map_name, 0);
+        var specular_tex_ptr: ?*resource_types.Texture = null;
+
+        if (specular_map_name.len > 0) {
+            logger.info("Loading specular texture for material '{s}': '{s}'", .{ name_slice, specular_map_name });
+            const specular_tex_id = texture.loadFromFile(specular_map_name);
+            if (specular_tex_id != texture.INVALID_TEXTURE_ID) {
+                specular_tex_ptr = texture.getTexture(specular_tex_id);
+                logger.info("Specular texture loaded successfully with ID: {d}", .{specular_tex_id});
+            } else {
+                logger.warn("Failed to load specular texture: '{s}'", .{specular_map_name});
+            }
+        }
+
+        // If specular texture loading failed, use default white texture
+        if (specular_tex_ptr == null) {
+            specular_tex_ptr = texture.getDefaultTexture();
+        }
+
         // Populate the material
         entry.material.id = material_id;
         entry.material.generation = 0;
@@ -310,6 +339,10 @@ pub const MaterialSystem = struct {
         entry.material.diffuse_colour = config.diffuse_colour;
         entry.material.diffuse_map.texture = tex_ptr.?;
         entry.material.diffuse_map.use = .TEXTURE_USE_MAP_DIFFUSE;
+        entry.material.specular_map.texture = specular_tex_ptr.?;
+        entry.material.specular_map.use = .TEXTURE_USE_MAP_SPECULAR;
+        entry.material.specular_color = config.specular_color;
+        entry.material.shininess = config.shininess;
 
         // Copy name to material
         @memcpy(&entry.material.name, &config.name);
@@ -399,8 +432,10 @@ pub const MaterialSystem = struct {
         if (renderer.getSystem()) |render_sys| {
             if (mat) |m| {
                 render_sys.bindTexture(m.diffuse_map.texture);
+                render_sys.bindSpecularTexture(m.specular_map.texture);
             } else {
                 render_sys.bindTexture(null);
+                render_sys.bindSpecularTexture(null);
             }
         }
     }
@@ -507,6 +542,14 @@ pub const MaterialSystem = struct {
             } else if (std.mem.eql(u8, key_trimmed, "diffuse_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.diffuse_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "specular_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.specular_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "specular_color")) {
+                // Parse "r,g,b" format
+                config.specular_color = parseVec3(value_trimmed);
+            } else if (std.mem.eql(u8, key_trimmed, "shininess")) {
+                config.shininess = std.fmt.parseFloat(f32, value_trimmed) catch 32.0;
             } else if (std.mem.eql(u8, key_trimmed, "auto_release")) {
                 config.auto_release = std.mem.eql(u8, value_trimmed, "true");
             }
@@ -529,6 +572,19 @@ pub const MaterialSystem = struct {
             if (i >= 4) break;
             const trimmed = std.mem.trim(u8, part, " \t");
             result.elements[i] = std.fmt.parseFloat(f32, trimmed) catch 1.0;
+            i += 1;
+        }
+        return result;
+    }
+
+    fn parseVec3(value: []const u8) [3]f32 {
+        var result: [3]f32 = .{ 1.0, 1.0, 1.0 };
+        var parts = std.mem.splitScalar(u8, value, ',');
+        var i: usize = 0;
+        while (parts.next()) |part| {
+            if (i >= 3) break;
+            const trimmed = std.mem.trim(u8, part, " \t");
+            result[i] = std.fmt.parseFloat(f32, trimmed) catch 1.0;
             i += 1;
         }
         return result;
