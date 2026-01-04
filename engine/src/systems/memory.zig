@@ -12,6 +12,7 @@ pub const AllocTag = enum {
     string,
     application,
     job,
+    resource_system,
     texture,
     mat_inst,
     renderer,

@@ -1439,6 +1439,177 @@ pub const GeometrySystem = struct {
 
         return null; // No free slots
     }
+
+    // ========== Async Loading API ==========
+
+    /// Async geometry loading arguments
+    const AsyncLoadArgs = struct {
+        path_copy: []const u8,
+        callback: ?*const fn (?*Geometry) void,
+    };
+
+    /// Load geometry asynchronously using job system
+    /// Returns job handle that can be waited on
+    /// Callback is invoked on main thread when loading completes
+    pub fn loadFromFileAsync(
+        self: *GeometrySystem,
+        path: []const u8,
+        callback: ?*const fn (?*Geometry) void,
+    ) !@import("jobs.zig").JobHandle {
+        // Check cache first
+        if (self.name_lookup.get(path)) |existing_id| {
+            const idx = existing_id - 1;
+            self.geometries[idx].ref_count += 1;
+            logger.debug("Geometry cache hit (async): {s} (id={}, ref_count={})", .{ path, existing_id, self.geometries[idx].ref_count });
+
+            // Immediately invoke callback with cached geometry
+            if (callback) |cb| {
+                cb(&self.geometries[idx].geometry);
+            }
+
+            // Return invalid handle since job didn't run
+            return @import("jobs.zig").INVALID_JOB_HANDLE;
+        }
+
+        // Duplicate path for the job (freed in job function)
+        const path_copy = try std.heap.page_allocator.dupe(u8, path);
+        errdefer std.heap.page_allocator.free(path_copy);
+
+        const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+        // Submit background job for file I/O and parsing
+        const load_handle = try jobs_sys.submit(asyncLoadJob, .{AsyncLoadArgs{
+            .path_copy = path_copy,
+            .callback = callback,
+        }});
+
+        return load_handle;
+    }
+
+    /// Background job that loads geometry from file
+    fn asyncLoadJob(args: AsyncLoadArgs) void {
+        defer std.heap.page_allocator.free(args.path_copy);
+
+        _ = getSystem() orelse {
+            logger.err("Geometry system not available in async load job", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Detect format from extension
+        const ext = getFileExtension(args.path_copy);
+        const allocator = std.heap.page_allocator;
+
+        // Load based on format
+        var load_result: ?struct {
+            vertices: []math_types.Vertex3D,
+            indices: []u32,
+        } = null;
+
+        if (std.mem.eql(u8, ext, "obj")) {
+            const result = obj_loader.loadObj(allocator, args.path_copy) orelse {
+                logger.err("Failed to load OBJ file (async): {s}", .{args.path_copy});
+                if (args.callback) |cb| cb(null);
+                return;
+            };
+            load_result = .{
+                .vertices = result.vertices,
+                .indices = result.indices,
+            };
+        } else if (std.mem.eql(u8, ext, "gltf") or std.mem.eql(u8, ext, "glb")) {
+            const result = gltf_loader.loadGltf(allocator, args.path_copy) orelse {
+                logger.err("Failed to load glTF file (async): {s}", .{args.path_copy});
+                if (args.callback) |cb| cb(null);
+                return;
+            };
+            load_result = .{
+                .vertices = result.vertices,
+                .indices = result.indices,
+            };
+        } else {
+            logger.err("Unsupported geometry format (async): {s}", .{ext});
+            if (args.callback) |cb| cb(null);
+            return;
+        }
+
+        const result = load_result.?;
+
+        // Copy path for main thread
+        const path_for_creation = std.heap.page_allocator.dupe(u8, args.path_copy) catch {
+            allocator.free(result.vertices);
+            allocator.free(result.indices);
+            logger.err("Failed to duplicate path for geometry creation", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Submit GPU upload job to main thread
+        const upload_args = AsyncUploadArgs{
+            .path = path_for_creation,
+            .vertices = result.vertices,
+            .indices = result.indices,
+            .callback = args.callback,
+        };
+
+        const jobs_sys = context.get().jobs orelse {
+            allocator.free(result.vertices);
+            allocator.free(result.indices);
+            std.heap.page_allocator.free(path_for_creation);
+            logger.err("Job system not available for geometry upload", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        _ = jobs_sys.submitMainThread(asyncUploadJob, .{upload_args}) catch {
+            allocator.free(result.vertices);
+            allocator.free(result.indices);
+            std.heap.page_allocator.free(path_for_creation);
+            logger.err("Failed to submit geometry upload job", .{});
+            if (args.callback) |cb| cb(null);
+        };
+    }
+
+    /// Arguments for GPU upload job
+    const AsyncUploadArgs = struct {
+        path: []const u8,
+        vertices: []math_types.Vertex3D,
+        indices: []u32,
+        callback: ?*const fn (?*Geometry) void,
+    };
+
+    /// Main-thread job that uploads geometry to GPU
+    fn asyncUploadJob(args: AsyncUploadArgs) void {
+        const allocator = std.heap.page_allocator;
+        defer allocator.free(args.vertices);
+        defer allocator.free(args.indices);
+        defer allocator.free(args.path);
+
+        const sys = getSystem() orelse {
+            logger.err("Geometry system not available in GPU upload job", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Create geometry from loaded data
+        const geom = sys.createFromData(
+            args.path,
+            args.vertices,
+            args.indices,
+        );
+
+        if (geom == null) {
+            logger.err("Failed to create geometry (async): {s}", .{args.path});
+            if (args.callback) |cb| cb(null);
+            return;
+        }
+
+        logger.info("Geometry loaded asynchronously: {s} (id={})", .{ args.path, geom.?.id });
+
+        // Invoke callback
+        if (args.callback) |cb| {
+            cb(geom);
+        }
+    }
 };
 
 // ============================================================================
@@ -1497,20 +1668,78 @@ pub fn getSystem() ?*GeometrySystem {
     return context.get().geometry;
 }
 
-pub fn acquireFromConfig(config: GeometryConfig) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.acquireFromConfig(config);
-}
+// ========== Public API (Used by Resource Manager) ==========
 
+/// Load geometry synchronously (used by Resource Manager)
 pub fn acquire(name: []const u8) ?*Geometry {
     const sys = getSystem() orelse return null;
     return sys.acquire(name);
 }
 
-pub fn acquireById(id: u32) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.acquireById(id);
+/// Load geometry asynchronously (used by Resource Manager)
+pub fn loadFromFileAsync(
+    path: []const u8,
+    callback: ?*const fn (?*Geometry) void,
+) !@import("jobs.zig").JobHandle {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    return sys.loadFromFileAsync(path, callback);
 }
+
+/// Generate plane geometry (used by Resource Manager)
+pub fn generatePlane(config: PlaneConfig) ?*Geometry {
+    const sys = getSystem() orelse {
+        logger.err("CRITICAL: GeometrySystem not available in context when generating plane", .{});
+        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
+        return null;
+    };
+    const result = sys.generatePlane(config);
+    if (result) |geo| {
+        logger.debug("[GEOMETRY] generatePlane returned geometry with ID: {}", .{geo.id});
+    }
+    return result;
+}
+
+/// Generate cube geometry (used by Resource Manager)
+pub fn generateCube(config: CubeConfig) ?*Geometry {
+    const sys = getSystem() orelse {
+        logger.err("CRITICAL: GeometrySystem not available in context when generating cube", .{});
+        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
+        return null;
+    };
+    const result = sys.generateCube(config);
+    if (result) |geo| {
+        logger.debug("[GEOMETRY] generateCube returned geometry with ID: {}", .{geo.id});
+    }
+    return result;
+}
+
+/// Generate sphere geometry (used by Resource Manager)
+pub fn generateSphere(config: SphereConfig) ?*Geometry {
+    const sys = getSystem() orelse {
+        logger.err("CRITICAL: GeometrySystem not available in context when generating sphere", .{});
+        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
+        return null;
+    };
+    const result = sys.generateSphere(config);
+    if (result) |geo| {
+        logger.debug("[GEOMETRY] generateSphere returned geometry with ID: {}", .{geo.id});
+    }
+    return result;
+}
+
+/// Generate cylinder geometry (used by Resource Manager)
+pub fn generateCylinder(config: CylinderConfig) ?*Geometry {
+    const sys = getSystem() orelse return null;
+    return sys.generateCylinder(config);
+}
+
+/// Generate cone geometry (used by Resource Manager)
+pub fn generateCone(config: ConeConfig) ?*Geometry {
+    const sys = getSystem() orelse return null;
+    return sys.generateCone(config);
+}
+
+// ========== Internal/Legacy API ==========
 
 pub fn release(id: u32) void {
     if (getSystem()) |sys| {
@@ -1531,53 +1760,4 @@ pub fn getDefault() ?*Geometry {
 pub fn getDefaultId() u32 {
     const sys = getSystem() orelse return INVALID_GEOMETRY_ID;
     return sys.getDefaultId();
-}
-
-pub fn generatePlane(config: PlaneConfig) ?*Geometry {
-    const sys = getSystem() orelse {
-        logger.err("CRITICAL: GeometrySystem not available in context when generating plane", .{});
-        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
-        return null;
-    };
-    const result = sys.generatePlane(config);
-    if (result) |geo| {
-        logger.debug("[GEOMETRY] generatePlane returned geometry with ID: {}", .{geo.id});
-    }
-    return result;
-}
-
-pub fn generateCube(config: CubeConfig) ?*Geometry {
-    const sys = getSystem() orelse {
-        logger.err("CRITICAL: GeometrySystem not available in context when generating cube", .{});
-        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
-        return null;
-    };
-    const result = sys.generateCube(config);
-    if (result) |geo| {
-        logger.debug("[GEOMETRY] generateCube returned geometry with ID: {}", .{geo.id});
-    }
-    return result;
-}
-
-pub fn generateSphere(config: SphereConfig) ?*Geometry {
-    const sys = getSystem() orelse {
-        logger.err("CRITICAL: GeometrySystem not available in context when generating sphere", .{});
-        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
-        return null;
-    };
-    const result = sys.generateSphere(config);
-    if (result) |geo| {
-        logger.debug("[GEOMETRY] generateSphere returned geometry with ID: {}", .{geo.id});
-    }
-    return result;
-}
-
-pub fn generateCylinder(config: CylinderConfig) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.generateCylinder(config);
-}
-
-pub fn generateCone(config: ConeConfig) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.generateCone(config);
 }

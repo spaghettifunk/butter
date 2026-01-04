@@ -322,6 +322,9 @@ pub const EditorSystem = struct {
         if (gizmo.render()) |delta| {
             applyGizmoDelta(delta);
         }
+
+        // Render orientation indicator in top-right corner
+        gizmo.renderOrientationIndicator();
     }
 
     /// Handle mouse click for object picking

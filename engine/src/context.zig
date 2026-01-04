@@ -19,6 +19,8 @@ const texture = @import("systems/texture.zig");
 const material = @import("systems/material.zig");
 const geometry = @import("systems/geometry.zig");
 const renderer = @import("renderer/renderer.zig");
+const jobs = @import("systems/jobs.zig");
+const resource_manager = @import("resources/manager.zig");
 
 const render_graph = @import("renderer/render_graph/mod.zig");
 
@@ -40,6 +42,9 @@ pub const EngineContext = extern struct {
 
     render_graph: ?*render_graph.RenderGraph,
 
+    jobs: ?*jobs.JobScheduler, // Job system for parallelization
+    resource_manager: ?*resource_manager.ResourceManager, // Unified resource management
+
     platform_window: ?*anyopaque, // Opaque pointer to GLFW window
     command_registry: ?*CommandRegistry, // Editor command registry
     editor_scene: ?*EditorScene, // Editor scene (shared across library boundaries)
@@ -59,6 +64,9 @@ var contextStorage: EngineContext = .{
     .renderer = null,
 
     .render_graph = null,
+
+    .jobs = null,
+    .resource_manager = null,
 
     .platform_window = null,
     .command_registry = null,

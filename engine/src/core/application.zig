@@ -8,6 +8,8 @@ const input = @import("../systems/input.zig");
 const texture = @import("../systems/texture.zig");
 const material = @import("../systems/material.zig");
 const geometry = @import("../systems/geometry.zig");
+const jobs = @import("../systems/jobs.zig");
+const resource_manager = @import("../resources/manager.zig");
 
 const clock = @import("clock.zig");
 
@@ -151,6 +153,13 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
         return false;
     }
 
+    // Initialize Job System early (before other systems that may use it)
+    const job_scheduler = jobs.JobScheduler.init(memory.getAllocator()) catch |err| {
+        logger.fatal("Failed to initialize job system: {}", .{err});
+        return false;
+    };
+    logger.info("Job system initialized with {} workers", .{job_scheduler.worker_count});
+
     // Allocate application state
     appState = memory.allocate(applicationState, .application) orelse {
         logger.fatal("Failed to allocate application state!", .{});
@@ -215,6 +224,12 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
     // Initialize geometry system (after renderer, texture, material)
     if (!geometry.GeometrySystem.initialize()) {
         logger.err("Failed to initialize geometry system.", .{});
+        return false;
+    }
+
+    // Initialize Resource Manager (after all resource systems)
+    if (!resource_manager.ResourceManager.init(memory.getAllocator())) {
+        logger.err("Failed to initialize resource manager system.", .{});
         return false;
     }
 
@@ -316,6 +331,12 @@ pub fn run() bool {
             // Draw the frame using the renderer, with game render in between begin/end
             const delta_f32: f32 = @floatCast(delta);
 
+            // Update Job System (process main-thread jobs)
+            const ctx = @import("../context.zig");
+            if (ctx.get().jobs) |job_scheduler| {
+                job_scheduler.update();
+            }
+
             // Update editor camera BEFORE beginFrame so view matrix is correct for rendering
             if (build_options.enable_editor and appState.editorMode) {
                 editor.EditorSystem.updateCamera(delta_f32);
@@ -408,6 +429,16 @@ pub fn run() bool {
         imgui.ImGuiSystem.shutdown();
     }
     render_graph.RenderGraphSystem.shutdown();
+
+    // Shutdown Resource Manager (before resource systems)
+    const ctx = @import("../context.zig");
+    if (ctx.get().resource_manager) |resource_mgr| {
+        resource_mgr.deinit();
+        memory.deallocate(resource_manager.ResourceManager, resource_mgr, .resource_system);
+        ctx.get().resource_manager = null;
+        logger.info("Resource manager shutdown", .{});
+    }
+
     geometry.GeometrySystem.shutdown();
 
     material.MaterialSystem.shutdown();
@@ -418,6 +449,13 @@ pub fn run() bool {
     input.InputSystem.shutdown();
 
     platform.shutdown(&appState.platform);
+
+    // Shutdown Job System (after all systems that use it)
+    if (ctx.get().jobs) |job_scheduler| {
+        job_scheduler.deinit();
+        ctx.get().jobs = null;
+        logger.info("Job system shutdown", .{});
+    }
 
     // Deallocate application state before shutting down memory system
     memory.deallocate(applicationState, appState, .application);

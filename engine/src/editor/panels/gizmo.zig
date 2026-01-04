@@ -84,6 +84,11 @@ pub const Gizmo = struct {
     /// Cached screen position of gizmo
     screen_pos: [2]f32 = .{ 0, 0 },
 
+    /// Cached projected axis directions (screen-space, normalized)
+    projected_x_dir: [2]f32 = .{ 1, 0 },
+    projected_y_dir: [2]f32 = .{ 0, -1 },
+    projected_z_dir: [2]f32 = .{ 0.7, 0.7 },
+
     /// Set the gizmo mode.
     pub fn setMode(self: *Gizmo, mode: GizmoMode) void {
         self.mode = mode;
@@ -131,6 +136,58 @@ pub const Gizmo = struct {
         return .{ screen_x, screen_y };
     }
 
+    /// Project a world-space axis direction to screen space
+    fn projectWorldAxis(self: *Gizmo, origin: [3]f32, axis_dir: [3]f32, length_pixels: f32) struct {
+        screen_start: [2]f32,
+        screen_end: [2]f32,
+        direction: [2]f32,
+        is_visible: bool,
+    } {
+        const screen_start = self.worldToScreen(origin) orelse return .{
+            .screen_start = .{ 0, 0 },
+            .screen_end = .{ 0, 0 },
+            .direction = .{ 0, 0 },
+            .is_visible = false,
+        };
+
+        // Calculate world-space endpoint
+        const world_end = [3]f32{
+            origin[0] + axis_dir[0],
+            origin[1] + axis_dir[1],
+            origin[2] + axis_dir[2],
+        };
+
+        const screen_end_proj = self.worldToScreen(world_end) orelse return .{
+            .screen_start = screen_start,
+            .screen_end = screen_start,
+            .direction = .{ 1, 0 },
+            .is_visible = false,
+        };
+
+        // Calculate screen-space direction
+        const dx = screen_end_proj[0] - screen_start[0];
+        const dy = screen_end_proj[1] - screen_start[1];
+        const len = @sqrt(dx * dx + dy * dy);
+
+        var direction = [2]f32{ 1, 0 };
+        if (len > 0.001) {
+            direction = .{ dx / len, dy / len };
+        }
+
+        // Scale to desired pixel length
+        const screen_end = [2]f32{
+            screen_start[0] + direction[0] * length_pixels,
+            screen_start[1] + direction[1] * length_pixels,
+        };
+
+        return .{
+            .screen_start = screen_start,
+            .screen_end = screen_end,
+            .direction = direction,
+            .is_visible = true,
+        };
+    }
+
     /// Render the gizmo overlay.
     /// Returns a transform delta if manipulation occurred.
     pub fn render(self: *Gizmo) ?TransformDelta {
@@ -166,6 +223,16 @@ pub const Gizmo = struct {
         const axis_thickness: f32 = 3;
         const arrow_size: f32 = 12;
 
+        // Project world-space axes to screen space
+        const x_axis = self.projectWorldAxis(self.position, .{ 1, 0, 0 }, axis_length);
+        const y_axis = self.projectWorldAxis(self.position, .{ 0, 1, 0 }, axis_length);
+        const z_axis = self.projectWorldAxis(self.position, .{ 0, 0, 1 }, axis_length);
+
+        // Cache projected directions for drag calculations
+        self.projected_x_dir = x_axis.direction;
+        self.projected_y_dir = y_axis.direction;
+        self.projected_z_dir = z_axis.direction;
+
         // Colors (ABGR format)
         const x_color: u32 = 0xFF0000FF; // Red
         const y_color: u32 = 0xFF00FF00; // Green
@@ -179,7 +246,7 @@ pub const Gizmo = struct {
         const mx = @as(f32, @floatCast(mouse_pos.x));
         const my = @as(f32, @floatCast(mouse_pos.y));
 
-        self.hovered_axis = self.checkAxisHover(mx, my, center_x, center_y, axis_length);
+        self.hovered_axis = self.checkAxisHoverProjected(mx, my, x_axis, y_axis, z_axis, axis_length);
 
         // Handle dragging
         var delta: ?TransformDelta = null;
@@ -204,137 +271,175 @@ pub const Gizmo = struct {
         // Draw axes based on mode
         switch (self.mode) {
             .translate => {
-                // X axis (right)
-                const x_col = if (self.hovered_axis == .x or self.dragging_axis == .x) hover_color else x_color;
-                imgui.drawListAddLineEx(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y },
-                    .{ .x = center_x + axis_length, .y = center_y },
-                    x_col,
-                    axis_thickness,
-                );
-                // Arrow head
-                imgui.drawListAddTriangleFilled(
-                    draw_list,
-                    .{ .x = center_x + axis_length + arrow_size, .y = center_y },
-                    .{ .x = center_x + axis_length, .y = center_y - arrow_size / 2 },
-                    .{ .x = center_x + axis_length, .y = center_y + arrow_size / 2 },
-                    x_col,
-                );
+                // X axis
+                if (x_axis.is_visible) {
+                    const x_col = if (self.hovered_axis == .x or self.dragging_axis == .x) hover_color else x_color;
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = x_axis.screen_start[0], .y = x_axis.screen_start[1] },
+                        .{ .x = x_axis.screen_end[0], .y = x_axis.screen_end[1] },
+                        x_col,
+                        axis_thickness,
+                    );
+                    // Arrow head
+                    const perp_x = -x_axis.direction[1] * arrow_size / 2;
+                    const perp_y = x_axis.direction[0] * arrow_size / 2;
+                    imgui.drawListAddTriangleFilled(
+                        draw_list,
+                        .{ .x = x_axis.screen_end[0] + x_axis.direction[0] * arrow_size, .y = x_axis.screen_end[1] + x_axis.direction[1] * arrow_size },
+                        .{ .x = x_axis.screen_end[0] + perp_x, .y = x_axis.screen_end[1] + perp_y },
+                        .{ .x = x_axis.screen_end[0] - perp_x, .y = x_axis.screen_end[1] - perp_y },
+                        x_col,
+                    );
+                    imgui.drawListAddText(draw_list, .{ .x = x_axis.screen_end[0] + x_axis.direction[0] * (arrow_size + 5), .y = x_axis.screen_end[1] + x_axis.direction[1] * (arrow_size + 5) - 7 }, x_col, "X");
+                }
 
-                // Y axis (up)
-                const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
-                imgui.drawListAddLineEx(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y },
-                    .{ .x = center_x, .y = center_y - axis_length },
-                    y_col,
-                    axis_thickness,
-                );
-                // Arrow head
-                imgui.drawListAddTriangleFilled(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y - axis_length - arrow_size },
-                    .{ .x = center_x - arrow_size / 2, .y = center_y - axis_length },
-                    .{ .x = center_x + arrow_size / 2, .y = center_y - axis_length },
-                    y_col,
-                );
+                // Y axis
+                if (y_axis.is_visible) {
+                    const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = y_axis.screen_start[0], .y = y_axis.screen_start[1] },
+                        .{ .x = y_axis.screen_end[0], .y = y_axis.screen_end[1] },
+                        y_col,
+                        axis_thickness,
+                    );
+                    // Arrow head
+                    const perp_x = -y_axis.direction[1] * arrow_size / 2;
+                    const perp_y = y_axis.direction[0] * arrow_size / 2;
+                    imgui.drawListAddTriangleFilled(
+                        draw_list,
+                        .{ .x = y_axis.screen_end[0] + y_axis.direction[0] * arrow_size, .y = y_axis.screen_end[1] + y_axis.direction[1] * arrow_size },
+                        .{ .x = y_axis.screen_end[0] + perp_x, .y = y_axis.screen_end[1] + perp_y },
+                        .{ .x = y_axis.screen_end[0] - perp_x, .y = y_axis.screen_end[1] - perp_y },
+                        y_col,
+                    );
+                    imgui.drawListAddText(draw_list, .{ .x = y_axis.screen_end[0] + y_axis.direction[0] * (arrow_size + 5), .y = y_axis.screen_end[1] + y_axis.direction[1] * (arrow_size + 5) - 7 }, y_col, "Y");
+                }
 
-                // Z axis (diagonal, towards viewer)
-                const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
-                const z_end_x = center_x + axis_length * 0.7;
-                const z_end_y = center_y + axis_length * 0.7;
-                imgui.drawListAddLineEx(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y },
-                    .{ .x = z_end_x, .y = z_end_y },
-                    z_col,
-                    axis_thickness,
-                );
-                // Labels
-                imgui.drawListAddText(draw_list, .{ .x = center_x + axis_length + arrow_size + 5, .y = center_y - 7 }, x_col, "X");
-                imgui.drawListAddText(draw_list, .{ .x = center_x - 4, .y = center_y - axis_length - arrow_size - 15 }, y_col, "Y");
-                imgui.drawListAddText(draw_list, .{ .x = z_end_x + 5, .y = z_end_y + 5 }, z_col, "Z");
+                // Z axis
+                if (z_axis.is_visible) {
+                    const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = z_axis.screen_start[0], .y = z_axis.screen_start[1] },
+                        .{ .x = z_axis.screen_end[0], .y = z_axis.screen_end[1] },
+                        z_col,
+                        axis_thickness,
+                    );
+                    // Arrow head
+                    const perp_x = -z_axis.direction[1] * arrow_size / 2;
+                    const perp_y = z_axis.direction[0] * arrow_size / 2;
+                    imgui.drawListAddTriangleFilled(
+                        draw_list,
+                        .{ .x = z_axis.screen_end[0] + z_axis.direction[0] * arrow_size, .y = z_axis.screen_end[1] + z_axis.direction[1] * arrow_size },
+                        .{ .x = z_axis.screen_end[0] + perp_x, .y = z_axis.screen_end[1] + perp_y },
+                        .{ .x = z_axis.screen_end[0] - perp_x, .y = z_axis.screen_end[1] - perp_y },
+                        z_col,
+                    );
+                    imgui.drawListAddText(draw_list, .{ .x = z_axis.screen_end[0] + z_axis.direction[0] * (arrow_size + 5), .y = z_axis.screen_end[1] + z_axis.direction[1] * (arrow_size + 5) - 7 }, z_col, "Z");
+                }
             },
             .rotate => {
-                // Draw rotation circles
+                // Draw rotation circles representing each rotation plane
                 const radius: f32 = axis_length * 0.8;
+                const num_segments: i32 = 48;
 
-                // X rotation (YZ plane)
+                // For rotation gizmos, we draw circles in 3D space projected to screen
+                // X rotation: circle in YZ plane (perpendicular to X axis)
                 const x_col = if (self.hovered_axis == .x or self.dragging_axis == .x) hover_color else x_color;
-                imgui.drawListAddCircleEx(draw_list, .{ .x = center_x, .y = center_y }, radius, x_col, 32, axis_thickness);
-                imgui.drawListAddText(draw_list, .{ .x = center_x + radius * 0.7 + 5, .y = center_y - radius * 0.7 - 7 }, x_col, "X");
+                self.drawRotationCircle(draw_list, .{ 1, 0, 0 }, radius, x_col, axis_thickness, num_segments);
 
-                // Y rotation (XZ plane) - draw as ellipse
+                // Y rotation: circle in XZ plane (perpendicular to Y axis)
                 const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
-                imgui.drawListAddEllipseEx(draw_list, .{ .x = center_x, .y = center_y }, .{ .x = radius, .y = radius * 0.3 }, y_col, 0, 32, axis_thickness);
-                imgui.drawListAddText(draw_list, .{ .x = center_x + radius + 10, .y = center_y - 7 }, y_col, "Y");
+                self.drawRotationCircle(draw_list, .{ 0, 1, 0 }, radius, y_col, axis_thickness, num_segments);
 
-                // Z rotation (XY plane) - draw as ellipse
+                // Z rotation: circle in XY plane (perpendicular to Z axis)
                 const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
-                imgui.drawListAddEllipseEx(draw_list, .{ .x = center_x, .y = center_y }, .{ .x = radius * 0.3, .y = radius }, z_col, 0, 32, axis_thickness);
-                imgui.drawListAddText(draw_list, .{ .x = center_x - 4, .y = center_y - radius - 15 }, z_col, "Z");
+                self.drawRotationCircle(draw_list, .{ 0, 0, 1 }, radius, z_col, axis_thickness, num_segments);
+
+                // Draw labels at the end of each axis
+                if (x_axis.is_visible) {
+                    imgui.drawListAddText(draw_list, .{ .x = x_axis.screen_end[0] + 5, .y = x_axis.screen_end[1] - 7 }, x_col, "X");
+                }
+                if (y_axis.is_visible) {
+                    imgui.drawListAddText(draw_list, .{ .x = y_axis.screen_end[0] + 5, .y = y_axis.screen_end[1] - 7 }, y_col, "Y");
+                }
+                if (z_axis.is_visible) {
+                    imgui.drawListAddText(draw_list, .{ .x = z_axis.screen_end[0] + 5, .y = z_axis.screen_end[1] - 7 }, z_col, "Z");
+                }
             },
             .scale => {
+                const box_size: f32 = 5;
+
                 // X axis with box
-                const x_col = if (self.hovered_axis == .x or self.dragging_axis == .x) hover_color else x_color;
-                imgui.drawListAddLineEx(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y },
-                    .{ .x = center_x + axis_length, .y = center_y },
-                    x_col,
-                    axis_thickness,
-                );
-                imgui.drawListAddRectFilled(
-                    draw_list,
-                    .{ .x = center_x + axis_length - 5, .y = center_y - 5 },
-                    .{ .x = center_x + axis_length + 5, .y = center_y + 5 },
-                    x_col,
-                );
-                imgui.drawListAddText(draw_list, .{ .x = center_x + axis_length + 10, .y = center_y - 7 }, x_col, "X");
+                if (x_axis.is_visible) {
+                    const x_col = if (self.hovered_axis == .x or self.dragging_axis == .x) hover_color else x_color;
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = x_axis.screen_start[0], .y = x_axis.screen_start[1] },
+                        .{ .x = x_axis.screen_end[0], .y = x_axis.screen_end[1] },
+                        x_col,
+                        axis_thickness,
+                    );
+                    // Box at end
+                    imgui.drawListAddRectFilled(
+                        draw_list,
+                        .{ .x = x_axis.screen_end[0] - box_size, .y = x_axis.screen_end[1] - box_size },
+                        .{ .x = x_axis.screen_end[0] + box_size, .y = x_axis.screen_end[1] + box_size },
+                        x_col,
+                    );
+                    imgui.drawListAddText(draw_list, .{ .x = x_axis.screen_end[0] + x_axis.direction[0] * 10, .y = x_axis.screen_end[1] + x_axis.direction[1] * 10 - 7 }, x_col, "X");
+                }
 
                 // Y axis with box
-                const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
-                imgui.drawListAddLineEx(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y },
-                    .{ .x = center_x, .y = center_y - axis_length },
-                    y_col,
-                    axis_thickness,
-                );
-                imgui.drawListAddRectFilled(
-                    draw_list,
-                    .{ .x = center_x - 5, .y = center_y - axis_length - 5 },
-                    .{ .x = center_x + 5, .y = center_y - axis_length + 5 },
-                    y_col,
-                );
-                imgui.drawListAddText(draw_list, .{ .x = center_x - 4, .y = center_y - axis_length - 20 }, y_col, "Y");
+                if (y_axis.is_visible) {
+                    const y_col = if (self.hovered_axis == .y or self.dragging_axis == .y) hover_color else y_color;
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = y_axis.screen_start[0], .y = y_axis.screen_start[1] },
+                        .{ .x = y_axis.screen_end[0], .y = y_axis.screen_end[1] },
+                        y_col,
+                        axis_thickness,
+                    );
+                    // Box at end
+                    imgui.drawListAddRectFilled(
+                        draw_list,
+                        .{ .x = y_axis.screen_end[0] - box_size, .y = y_axis.screen_end[1] - box_size },
+                        .{ .x = y_axis.screen_end[0] + box_size, .y = y_axis.screen_end[1] + box_size },
+                        y_col,
+                    );
+                    imgui.drawListAddText(draw_list, .{ .x = y_axis.screen_end[0] + y_axis.direction[0] * 10, .y = y_axis.screen_end[1] + y_axis.direction[1] * 10 - 7 }, y_col, "Y");
+                }
 
                 // Z axis with box
-                const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
-                const z_end_x = center_x + axis_length * 0.7;
-                const z_end_y = center_y + axis_length * 0.7;
-                imgui.drawListAddLineEx(
-                    draw_list,
-                    .{ .x = center_x, .y = center_y },
-                    .{ .x = z_end_x, .y = z_end_y },
-                    z_col,
-                    axis_thickness,
-                );
-                imgui.drawListAddRectFilled(
-                    draw_list,
-                    .{ .x = z_end_x - 5, .y = z_end_y - 5 },
-                    .{ .x = z_end_x + 5, .y = z_end_y + 5 },
-                    z_col,
-                );
-                imgui.drawListAddText(draw_list, .{ .x = z_end_x + 10, .y = z_end_y + 5 }, z_col, "Z");
+                if (z_axis.is_visible) {
+                    const z_col = if (self.hovered_axis == .z or self.dragging_axis == .z) hover_color else z_color;
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = z_axis.screen_start[0], .y = z_axis.screen_start[1] },
+                        .{ .x = z_axis.screen_end[0], .y = z_axis.screen_end[1] },
+                        z_col,
+                        axis_thickness,
+                    );
+                    // Box at end
+                    imgui.drawListAddRectFilled(
+                        draw_list,
+                        .{ .x = z_axis.screen_end[0] - box_size, .y = z_axis.screen_end[1] - box_size },
+                        .{ .x = z_axis.screen_end[0] + box_size, .y = z_axis.screen_end[1] + box_size },
+                        z_col,
+                    );
+                    imgui.drawListAddText(draw_list, .{ .x = z_axis.screen_end[0] + z_axis.direction[0] * 10, .y = z_axis.screen_end[1] + z_axis.direction[1] * 10 - 7 }, z_col, "Z");
+                }
 
                 // Center cube for uniform scale
+                const cx = x_axis.screen_start[0];
+                const cy = x_axis.screen_start[1];
                 const all_col = if (self.hovered_axis == .all or self.dragging_axis == .all) hover_color else text_color;
                 imgui.drawListAddRectFilled(
                     draw_list,
-                    .{ .x = center_x - 8, .y = center_y - 8 },
-                    .{ .x = center_x + 8, .y = center_y + 8 },
+                    .{ .x = cx - 8, .y = cy - 8 },
+                    .{ .x = cx + 8, .y = cy + 8 },
                     all_col,
                 );
             },
@@ -366,7 +471,76 @@ pub const Gizmo = struct {
         return delta;
     }
 
-    /// Check which axis is being hovered.
+    /// Check which axis is being hovered using projected axes.
+    fn checkAxisHoverProjected(
+        self: *Gizmo,
+        mx: f32,
+        my: f32,
+        x_axis: anytype,
+        y_axis: anytype,
+        z_axis: anytype,
+        length: f32,
+    ) Axis {
+        const threshold: f32 = 15;
+
+        if (self.mode == .rotate) {
+            // For rotation mode, fall back to old circular detection (needs improvement later)
+            const cx = x_axis.screen_start[0];
+            const cy = x_axis.screen_start[1];
+            return self.checkAxisHover(mx, my, cx, cy, length);
+        }
+
+        // Translate / Scale: Check distance to projected lines
+        // Check X axis
+        if (x_axis.is_visible) {
+            const dist = pointToLineDistance(
+                mx,
+                my,
+                x_axis.screen_start[0],
+                x_axis.screen_start[1],
+                x_axis.screen_end[0],
+                x_axis.screen_end[1],
+            );
+            if (dist < threshold) return .x;
+        }
+
+        // Check Y axis
+        if (y_axis.is_visible) {
+            const dist = pointToLineDistance(
+                mx,
+                my,
+                y_axis.screen_start[0],
+                y_axis.screen_start[1],
+                y_axis.screen_end[0],
+                y_axis.screen_end[1],
+            );
+            if (dist < threshold) return .y;
+        }
+
+        // Check Z axis
+        if (z_axis.is_visible) {
+            const dist = pointToLineDistance(
+                mx,
+                my,
+                z_axis.screen_start[0],
+                z_axis.screen_start[1],
+                z_axis.screen_end[0],
+                z_axis.screen_end[1],
+            );
+            if (dist < threshold) return .z;
+        }
+
+        // Check center (for uniform scale)
+        const cx = x_axis.screen_start[0];
+        const cy = x_axis.screen_start[1];
+        if (mx >= cx - 10 and mx <= cx + 10 and my >= cy - 10 and my <= cy + 10) {
+            return .all;
+        }
+
+        return .none;
+    }
+
+    /// Check which axis is being hovered (old method for rotate mode).
     fn checkAxisHover(self: *Gizmo, mx: f32, my: f32, cx: f32, cy: f32, length: f32) Axis {
         const threshold: f32 = 15;
 
@@ -435,12 +609,19 @@ pub const Gizmo = struct {
 
         switch (self.mode) {
             .translate => {
+                // Project mouse movement onto the screen-space axis direction
                 switch (self.dragging_axis) {
-                    .x => delta.position[0] = dx * sensitivity,
-                    .y => delta.position[1] = -dy * sensitivity,
+                    .x => {
+                        const proj = dx * self.projected_x_dir[0] + dy * self.projected_x_dir[1];
+                        delta.position[0] = proj * sensitivity;
+                    },
+                    .y => {
+                        const proj = dx * self.projected_y_dir[0] + dy * self.projected_y_dir[1];
+                        delta.position[1] = proj * sensitivity;
+                    },
                     .z => {
-                        const avg = (dx + dy) * 0.5;
-                        delta.position[2] = avg * sensitivity;
+                        const proj = dx * self.projected_z_dir[0] + dy * self.projected_z_dir[1];
+                        delta.position[2] = proj * sensitivity;
                     },
                     else => {},
                 }
@@ -457,11 +638,17 @@ pub const Gizmo = struct {
             .scale => {
                 const scale_sensitivity: f32 = 0.01;
                 switch (self.dragging_axis) {
-                    .x => delta.scale[0] = 1.0 + dx * scale_sensitivity,
-                    .y => delta.scale[1] = 1.0 - dy * scale_sensitivity,
+                    .x => {
+                        const proj = dx * self.projected_x_dir[0] + dy * self.projected_x_dir[1];
+                        delta.scale[0] = 1.0 + proj * scale_sensitivity;
+                    },
+                    .y => {
+                        const proj = dx * self.projected_y_dir[0] + dy * self.projected_y_dir[1];
+                        delta.scale[1] = 1.0 + proj * scale_sensitivity;
+                    },
                     .z => {
-                        const avg = (dx + dy) * 0.5;
-                        delta.scale[2] = 1.0 + avg * scale_sensitivity;
+                        const proj = dx * self.projected_z_dir[0] + dy * self.projected_z_dir[1];
+                        delta.scale[2] = 1.0 + proj * scale_sensitivity;
                     },
                     .all => {
                         const uniform = 1.0 + (dx - dy) * 0.5 * scale_sensitivity;
@@ -474,7 +661,200 @@ pub const Gizmo = struct {
 
         return delta;
     }
+
+    /// Draw a rotation circle in 3D space (perpendicular to the given axis)
+    fn drawRotationCircle(
+        self: *Gizmo,
+        draw_list: *c.ImDrawList,
+        axis_normal: [3]f32,
+        radius: f32,
+        color: u32,
+        thickness: f32,
+        num_segments: i32,
+    ) void {
+        // Generate circle points in 3D space perpendicular to the axis
+        // We need two perpendicular vectors to the axis to define the plane
+        var tangent1: [3]f32 = undefined;
+        var tangent2: [3]f32 = undefined;
+
+        // Find two perpendicular vectors to axis_normal
+        if (@abs(axis_normal[0]) < 0.9) {
+            tangent1 = .{ 1, 0, 0 };
+        } else {
+            tangent1 = .{ 0, 1, 0 };
+        }
+
+        // Cross product: tangent1 = axis_normal × tangent1
+        const cross1 = [3]f32{
+            axis_normal[1] * tangent1[2] - axis_normal[2] * tangent1[1],
+            axis_normal[2] * tangent1[0] - axis_normal[0] * tangent1[2],
+            axis_normal[0] * tangent1[1] - axis_normal[1] * tangent1[0],
+        };
+        const len1 = @sqrt(cross1[0] * cross1[0] + cross1[1] * cross1[1] + cross1[2] * cross1[2]);
+        tangent1 = .{ cross1[0] / len1, cross1[1] / len1, cross1[2] / len1 };
+
+        // Cross product: tangent2 = axis_normal × tangent1
+        const cross2 = [3]f32{
+            axis_normal[1] * tangent1[2] - axis_normal[2] * tangent1[1],
+            axis_normal[2] * tangent1[0] - axis_normal[0] * tangent1[2],
+            axis_normal[0] * tangent1[1] - axis_normal[1] * tangent1[0],
+        };
+        const len2 = @sqrt(cross2[0] * cross2[0] + cross2[1] * cross2[1] + cross2[2] * cross2[2]);
+        tangent2 = .{ cross2[0] / len2, cross2[1] / len2, cross2[2] / len2 };
+
+        // Draw circle as line segments
+        var prev_screen: ?[2]f32 = null;
+        var i: i32 = 0;
+        while (i <= num_segments) : (i += 1) {
+            const angle = @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi / @as(f32, @floatFromInt(num_segments));
+            const cos_a = @cos(angle);
+            const sin_a = @sin(angle);
+
+            // Point on circle in 3D space
+            const world_point = [3]f32{
+                self.position[0] + (tangent1[0] * cos_a + tangent2[0] * sin_a) * radius * 0.01,
+                self.position[1] + (tangent1[1] * cos_a + tangent2[1] * sin_a) * radius * 0.01,
+                self.position[2] + (tangent1[2] * cos_a + tangent2[2] * sin_a) * radius * 0.01,
+            };
+
+            if (self.worldToScreen(world_point)) |screen_point| {
+                if (prev_screen) |prev| {
+                    imgui.drawListAddLineEx(
+                        draw_list,
+                        .{ .x = prev[0], .y = prev[1] },
+                        .{ .x = screen_point[0], .y = screen_point[1] },
+                        color,
+                        thickness,
+                    );
+                }
+                prev_screen = screen_point;
+            } else {
+                prev_screen = null;
+            }
+        }
+    }
+
+    /// Render a small orientation indicator in the top-right corner.
+    /// This shows the current scene orientation similar to Unity/Unreal.
+    pub fn renderOrientationIndicator(self: *Gizmo) void {
+        if (!self.use_world_position) return; // Need view projection matrix
+
+        const draw_list = imgui.getForegroundDrawList();
+        const io = imgui.getIO();
+        const display_size = io.*.DisplaySize;
+
+        // Position in top-right corner
+        const margin: f32 = 60;
+        const center_x = display_size.x - margin;
+        const center_y = margin;
+        const size: f32 = 40;
+
+        // Colors (ABGR format)
+        const x_color: u32 = 0xFF0000FF; // Red
+        const y_color: u32 = 0xFF00FF00; // Green
+        const z_color: u32 = 0xFFFF0000; // Blue
+        const bg_color: u32 = 0xAA1A1A1A; // Semi-transparent dark background
+
+        // Draw background circle
+        imgui.drawListAddCircleFilled(draw_list, .{ .x = center_x, .y = center_y }, size + 5, bg_color, 32);
+
+        // Project world axes from origin
+        const origin = [3]f32{ 0, 0, 0 };
+        const x_axis = self.projectWorldAxis(origin, .{ 1, 0, 0 }, size);
+        const y_axis = self.projectWorldAxis(origin, .{ 0, 1, 0 }, size);
+        const z_axis = self.projectWorldAxis(origin, .{ 0, 0, 1 }, size);
+
+        // Calculate endpoints relative to indicator center
+        const x_end = [2]f32{ center_x + x_axis.direction[0] * size, center_y + x_axis.direction[1] * size };
+        const y_end = [2]f32{ center_x + y_axis.direction[0] * size, center_y + y_axis.direction[1] * size };
+        const z_end = [2]f32{ center_x + z_axis.direction[0] * size, center_y + z_axis.direction[1] * size };
+
+        // Calculate depth for proper draw order (which axes are closer to camera)
+        // We can use the Z component of the transformed direction to determine depth
+        const x_depth = self.getAxisDepth(.{ 1, 0, 0 });
+        const y_depth = self.getAxisDepth(.{ 0, 1, 0 });
+        const z_depth = self.getAxisDepth(.{ 0, 0, 1 });
+
+        // Sort axes by depth (draw furthest first)
+        const AxisDraw = struct {
+            depth: f32,
+            end: [2]f32,
+            color: u32,
+            label: [*:0]const u8,
+        };
+
+        var axes = [3]AxisDraw{
+            .{ .depth = x_depth, .end = x_end, .color = x_color, .label = "X" },
+            .{ .depth = y_depth, .end = y_end, .color = y_color, .label = "Y" },
+            .{ .depth = z_depth, .end = z_end, .color = z_color, .label = "Z" },
+        };
+
+        // Simple bubble sort by depth (furthest first)
+        for (0..axes.len) |i| {
+            for (i + 1..axes.len) |j| {
+                if (axes[i].depth > axes[j].depth) {
+                    const temp = axes[i];
+                    axes[i] = axes[j];
+                    axes[j] = temp;
+                }
+            }
+        }
+
+        // Draw axes in order (furthest to nearest)
+        const thickness: f32 = 2.5;
+        for (axes) |axis| {
+            // Darken color if pointing away from camera (negative depth)
+            const color = if (axis.depth < 0) blendColor(axis.color, 0xFF000000, 0.5) else axis.color;
+
+            imgui.drawListAddLineEx(
+                draw_list,
+                .{ .x = center_x, .y = center_y },
+                .{ .x = axis.end[0], .y = axis.end[1] },
+                color,
+                thickness,
+            );
+
+            // Draw label
+            imgui.drawListAddText(
+                draw_list,
+                .{ .x = axis.end[0] + 3, .y = axis.end[1] - 8 },
+                color,
+                axis.label,
+            );
+        }
+
+        // Draw center dot
+        imgui.drawListAddCircleFilled(draw_list, .{ .x = center_x, .y = center_y }, 3, 0xFFFFFFFF, 12);
+    }
+
+    /// Get the depth of an axis direction (positive = towards camera, negative = away)
+    fn getAxisDepth(self: *Gizmo, axis_dir: [3]f32) f32 {
+        // Transform axis direction by view matrix (just rotation part)
+        // We can use the Z component of the view-space direction
+        const z = self.view_proj.data[2] * axis_dir[0] + self.view_proj.data[6] * axis_dir[1] + self.view_proj.data[10] * axis_dir[2];
+        return -z; // Negate because in view space, -Z is forward
+    }
 };
+
+/// Blend two colors together
+fn blendColor(color1: u32, color2: u32, t: f32) u32 {
+    const r1 = @as(f32, @floatFromInt((color1 >> 0) & 0xFF));
+    const g1 = @as(f32, @floatFromInt((color1 >> 8) & 0xFF));
+    const b1 = @as(f32, @floatFromInt((color1 >> 16) & 0xFF));
+    const a1 = @as(f32, @floatFromInt((color1 >> 24) & 0xFF));
+
+    const r2 = @as(f32, @floatFromInt((color2 >> 0) & 0xFF));
+    const g2 = @as(f32, @floatFromInt((color2 >> 8) & 0xFF));
+    const b2 = @as(f32, @floatFromInt((color2 >> 16) & 0xFF));
+    const a2 = @as(f32, @floatFromInt((color2 >> 24) & 0xFF));
+
+    const r = @as(u32, @intFromFloat(r1 * (1.0 - t) + r2 * t));
+    const g = @as(u32, @intFromFloat(g1 * (1.0 - t) + g2 * t));
+    const b = @as(u32, @intFromFloat(b1 * (1.0 - t) + b2 * t));
+    const a = @as(u32, @intFromFloat(a1 * (1.0 - t) + a2 * t));
+
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
 
 /// Calculate distance from point to line segment.
 fn pointToLineDistance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) f32 {

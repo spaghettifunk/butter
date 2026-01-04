@@ -16,6 +16,7 @@ const filesystem = @import("../platform/filesystem.zig");
 const resource_types = @import("../resources/types.zig");
 const renderer = @import("../renderer/renderer.zig");
 const texture = @import("texture.zig");
+const jobs = @import("jobs.zig");
 
 /// Invalid material ID constant
 pub const INVALID_MATERIAL_ID: u32 = 0;
@@ -607,6 +608,186 @@ pub const MaterialSystem = struct {
 
         return null; // No free slots
     }
+
+    // ========== Async Loading API ==========
+
+    /// Async material loading arguments
+    const AsyncAcquireArgs = struct {
+        name_copy: []const u8,
+        callback: ?*const fn (?*resource_types.Material) void,
+    };
+
+    /// Acquire material asynchronously using job system
+    /// Returns job handle that can be waited on
+    /// Callback is invoked on main thread when loading completes
+    pub fn acquireAsync(
+        self: *MaterialSystem,
+        name: []const u8,
+        callback: ?*const fn (?*resource_types.Material) void,
+    ) !jobs.JobHandle {
+        // Check cache first
+        if (self.name_lookup.get(name)) |existing_id| {
+            const idx = existing_id - 1;
+            self.materials[idx].ref_count += 1;
+            logger.debug("Material cache hit (async): {s} (id={}, ref_count={})", .{ name, existing_id, self.materials[idx].ref_count });
+
+            // Immediately invoke callback with cached material
+            if (callback) |cb| {
+                cb(&self.materials[idx].material);
+            }
+
+            // Return invalid handle since job didn't run
+            return jobs.INVALID_JOB_HANDLE;
+        }
+
+        // Duplicate name for the job (freed in job function)
+        const name_copy = try std.heap.page_allocator.dupe(u8, name);
+        errdefer std.heap.page_allocator.free(name_copy);
+
+        const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+        // Submit background job for file I/O and parsing
+        const load_handle = try jobs_sys.submit(asyncAcquireJob, .{AsyncAcquireArgs{
+            .name_copy = name_copy,
+            .callback = callback,
+        }});
+
+        return load_handle;
+    }
+
+    /// Background job that loads material from file
+    fn asyncAcquireJob(args: AsyncAcquireArgs) void {
+        defer std.heap.page_allocator.free(args.name_copy);
+
+        _ = getSystem() orelse {
+            logger.err("Material system not available in async load job", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Build path to material file
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "../assets/materials/{s}.bmt", .{args.name_copy}) catch {
+            logger.err("Material name too long (async): {s}", .{args.name_copy});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // 1. Load file from disk (I/O-bound)
+        var file_handle: filesystem.FileHandle = .{};
+        if (!filesystem.open(path, .{ .read = true }, &file_handle)) {
+            logger.err("Failed to open material file (async): {s}", .{path});
+            if (args.callback) |cb| cb(null);
+            return;
+        }
+        defer filesystem.close(&file_handle);
+
+        const file_data = filesystem.readAllBytes(&file_handle, std.heap.page_allocator) orelse {
+            logger.err("Failed to read material file (async): {s}", .{path});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+        defer std.heap.page_allocator.free(file_data);
+
+        // 2. Parse material config (CPU-bound)
+        var config: MaterialConfig = .{
+            .name = [_]u8{0} ** resource_types.MATERIAL_NAME_MAX_LENGTH,
+            .auto_release = true,
+            .diffuse_colour = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+            .diffuse_map_name = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+        };
+
+        var lines = std.mem.splitScalar(u8, file_data, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+            var parts = std.mem.splitScalar(u8, trimmed, '=');
+            const key = parts.next() orelse continue;
+            const value = parts.next() orelse continue;
+
+            const key_trimmed = std.mem.trim(u8, key, " \t");
+            const value_trimmed = std.mem.trim(u8, value, " \t");
+
+            if (std.mem.eql(u8, key_trimmed, "name")) {
+                const copy_len = @min(value_trimmed.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
+                @memcpy(config.name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "diffuse_colour")) {
+                const color = parseVec3(value_trimmed);
+                config.diffuse_colour = .{ .elements = .{ color[0], color[1], color[2], 1.0 } };
+            } else if (std.mem.eql(u8, key_trimmed, "diffuse_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.diffuse_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "specular_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.specular_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "specular_color")) {
+                config.specular_color = parseVec3(value_trimmed);
+            } else if (std.mem.eql(u8, key_trimmed, "shininess")) {
+                config.shininess = std.fmt.parseFloat(f32, value_trimmed) catch 32.0;
+            }
+        }
+
+        // Copy config for main thread (it will be freed there)
+        const config_copy = std.heap.page_allocator.create(MaterialConfig) catch {
+            logger.err("Failed to allocate config for async material creation", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+        config_copy.* = config;
+
+        // 3. Submit material creation job to main thread (may need to load textures)
+        const jobs_sys = context.get().jobs orelse {
+            std.heap.page_allocator.destroy(config_copy);
+            logger.err("Job system not available for material creation", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        const create_args = AsyncCreateArgs{
+            .config = config_copy,
+            .callback = args.callback,
+        };
+
+        _ = jobs_sys.submitMainThread(asyncCreateMaterialJob, .{create_args}) catch {
+            std.heap.page_allocator.destroy(config_copy);
+            logger.err("Failed to submit material creation job", .{});
+            if (args.callback) |cb| cb(null);
+        };
+    }
+
+    /// Arguments for material creation job
+    const AsyncCreateArgs = struct {
+        config: *MaterialConfig,
+        callback: ?*const fn (?*resource_types.Material) void,
+    };
+
+    /// Main-thread job that creates material (may load textures)
+    fn asyncCreateMaterialJob(args: AsyncCreateArgs) void {
+        defer std.heap.page_allocator.destroy(args.config);
+
+        const sys = getSystem() orelse {
+            logger.err("Material system not available in creation job", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Create material from config (this may synchronously load textures)
+        const mat = sys.acquireFromConfig(args.config.*);
+        if (mat == null) {
+            logger.err("Failed to create material from config (async)", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        }
+
+        const name_slice = std.mem.sliceTo(&args.config.name, 0);
+        logger.info("Material loaded asynchronously: {s} (id={})", .{ name_slice, mat.?.id });
+
+        // Invoke callback
+        if (args.callback) |cb| {
+            cb(mat);
+        }
+    }
 };
 
 /// Get the material system instance
@@ -614,17 +795,24 @@ pub fn getSystem() ?*MaterialSystem {
     return context.get().material;
 }
 
-// ========== Convenience functions ==========
+// ========== Public API (Used by Resource Manager) ==========
 
+/// Load material synchronously (used by Resource Manager)
 pub fn acquire(name: []const u8) ?*resource_types.Material {
     const sys = getSystem() orelse return null;
     return sys.acquire(name);
 }
 
-pub fn acquireFromConfig(config: MaterialConfig) ?*resource_types.Material {
-    const sys = getSystem() orelse return null;
-    return sys.acquireFromConfig(config);
+/// Load material asynchronously (used by Resource Manager)
+pub fn acquireAsync(
+    name: []const u8,
+    callback: ?*const fn (?*resource_types.Material) void,
+) !jobs.JobHandle {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    return sys.acquireAsync(name, callback);
 }
+
+// ========== Internal/Legacy API ==========
 
 pub fn release(name: []const u8) void {
     if (getSystem()) |sys| {
