@@ -13,6 +13,7 @@ const logger = @import("../core/logging.zig");
 const filesystem = @import("../platform/filesystem.zig");
 const resource_types = @import("../resources/types.zig");
 const renderer = @import("../renderer/renderer.zig");
+const jobs = @import("jobs.zig");
 
 // stb_image import for image loading
 const stbImage = @cImport({
@@ -420,6 +421,222 @@ pub const TextureSystem = struct {
 
         return null; // No free slots
     }
+
+    // ========== Async Loading API ==========
+
+    /// Async texture loading arguments
+    const AsyncLoadArgs = struct {
+        path_copy: []const u8,
+        options: LoadOptions,
+        callback: ?*const fn (u32) void,
+    };
+
+    /// Load texture asynchronously using job system
+    /// Returns job handle that can be waited on
+    /// Callback is invoked on main thread when loading completes
+    pub fn loadFromFileAsync(
+        self: *TextureSystem,
+        path: []const u8,
+        options: LoadOptions,
+        callback: ?*const fn (u32) void,
+    ) !jobs.JobHandle {
+        _ = self;
+
+        // Check if already cached
+        const sys = getSystem() orelse return error.SystemNotInitialized;
+        if (sys.path_lookup.get(path)) |existing_id| {
+            const idx = existing_id - 1;
+            sys.textures[idx].ref_count += 1;
+            logger.debug("Texture cache hit (async): {s} (id={}, ref_count={})", .{ path, existing_id, sys.textures[idx].ref_count });
+
+            // Immediately invoke callback with cached texture
+            if (callback) |cb| {
+                cb(existing_id);
+            }
+
+            // Return invalid handle since job didn't run
+            return jobs.INVALID_JOB_HANDLE;
+        }
+
+        // Duplicate path for the job (freed in job function)
+        const path_copy = try std.heap.page_allocator.dupe(u8, path);
+        errdefer std.heap.page_allocator.free(path_copy);
+
+        const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+        // Submit background job for I/O and decoding
+        const load_handle = try jobs_sys.submit(asyncLoadJob, .{AsyncLoadArgs{
+            .path_copy = path_copy,
+            .options = options,
+            .callback = callback,
+        }});
+
+        return load_handle;
+    }
+
+    /// Background job that loads texture from file
+    fn asyncLoadJob(args: AsyncLoadArgs) void {
+        defer std.heap.page_allocator.free(args.path_copy);
+
+        _ = getSystem() orelse {
+            logger.err("Texture system not available in async load job", .{});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        };
+
+        // 1. Load file from disk (I/O-bound)
+        var file_handle: filesystem.FileHandle = .{};
+        if (!filesystem.open(args.path_copy, .{ .read = true }, &file_handle)) {
+            logger.err("Failed to open image file (async): {s}", .{args.path_copy});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        }
+        defer filesystem.close(&file_handle);
+
+        const file_data = filesystem.readAllBytes(&file_handle, std.heap.page_allocator) orelse {
+            logger.err("Failed to read image file (async): {s}", .{args.path_copy});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        };
+        defer std.heap.page_allocator.free(file_data);
+
+        // 2. Decode image (CPU-bound)
+        stbImage.stbi_set_flip_vertically_on_load(if (args.options.flip_vertical) 1 else 0);
+
+        var width: c_int = 0;
+        var height: c_int = 0;
+        var channels: c_int = 0;
+        const desired_channels: c_int = @intCast(args.options.desired_channels);
+
+        const pixels = stbImage.stbi_load_from_memory(
+            file_data.ptr,
+            @intCast(file_data.len),
+            &width,
+            &height,
+            &channels,
+            desired_channels,
+        );
+
+        if (pixels == null) {
+            const failure_reason = stbImage.stbi_failure_reason();
+            if (failure_reason != null) {
+                logger.err("Failed to decode image (async) '{s}': {s}", .{ args.path_copy, failure_reason });
+            } else {
+                logger.err("Failed to decode image (async) '{s}': unknown error", .{args.path_copy});
+            }
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        }
+        defer stbImage.stbi_image_free(pixels);
+
+        const actual_channels: u8 = if (args.options.desired_channels != 0)
+            args.options.desired_channels
+        else
+            @intCast(channels);
+
+        const has_transparency = actual_channels == 4;
+        const pixel_count: usize = @intCast(width * height);
+        const pixel_data_size = pixel_count * @as(usize, actual_channels);
+        const pixel_slice: []const u8 = pixels[0..pixel_data_size];
+
+        // Copy pixel data for main thread (freed in GPU upload job)
+        const pixel_copy = std.heap.page_allocator.dupe(u8, pixel_slice) catch {
+            logger.err("Failed to allocate pixel buffer for async texture upload", .{});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        };
+
+        // 3. Submit GPU upload job to main thread
+        const upload_args = AsyncUploadArgs{
+            .path_copy = std.heap.page_allocator.dupe(u8, args.path_copy) catch {
+                std.heap.page_allocator.free(pixel_copy);
+                if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+                return;
+            },
+            .width = @intCast(width),
+            .height = @intCast(height),
+            .channel_count = actual_channels,
+            .has_transparency = has_transparency,
+            .pixels = pixel_copy,
+            .callback = args.callback,
+        };
+
+        const jobs_sys = context.get().jobs orelse {
+            std.heap.page_allocator.free(pixel_copy);
+            std.heap.page_allocator.free(upload_args.path_copy);
+            logger.err("Job system not available for GPU upload", .{});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        };
+
+        _ = jobs_sys.submitMainThread(asyncUploadJob, .{upload_args}) catch {
+            std.heap.page_allocator.free(pixel_copy);
+            std.heap.page_allocator.free(upload_args.path_copy);
+            logger.err("Failed to submit GPU upload job", .{});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+        };
+    }
+
+    /// Arguments for GPU upload job
+    const AsyncUploadArgs = struct {
+        path_copy: []const u8,
+        width: u32,
+        height: u32,
+        channel_count: u8,
+        has_transparency: bool,
+        pixels: []const u8,
+        callback: ?*const fn (u32) void,
+    };
+
+    /// Main-thread job that uploads texture to GPU
+    fn asyncUploadJob(args: AsyncUploadArgs) void {
+        defer std.heap.page_allocator.free(args.pixels);
+        defer std.heap.page_allocator.free(args.path_copy);
+
+        const sys = getSystem() orelse {
+            logger.err("Texture system not available in GPU upload job", .{});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        };
+
+        // Create GPU texture
+        const texture_id = sys.createFromPixelsInternal(
+            args.width,
+            args.height,
+            args.channel_count,
+            args.has_transparency,
+            args.pixels,
+            args.path_copy,
+        );
+
+        if (texture_id == INVALID_TEXTURE_ID) {
+            logger.err("Failed to create GPU texture (async): {s}", .{args.path_copy});
+            if (args.callback) |cb| cb(INVALID_TEXTURE_ID);
+            return;
+        }
+
+        // Add to path cache
+        const path_for_cache = std.heap.page_allocator.dupe(u8, args.path_copy) catch {
+            logger.warn("Failed to allocate path for cache (async): {s}", .{args.path_copy});
+            if (args.callback) |cb| cb(texture_id);
+            return;
+        };
+
+        const idx = texture_id - 1;
+        sys.textures[idx].path = path_for_cache;
+        sys.path_lookup.put(path_for_cache, texture_id) catch {
+            logger.warn("Failed to add texture to cache (async): {s}", .{args.path_copy});
+            std.heap.page_allocator.free(path_for_cache);
+            sys.textures[idx].path = null;
+        };
+
+        logger.info("Texture loaded asynchronously: {s} (id={})", .{ args.path_copy, texture_id });
+
+        // Invoke callback
+        if (args.callback) |cb| {
+            cb(texture_id);
+        }
+    }
 };
 
 /// Get the texture system instance
@@ -427,17 +644,25 @@ pub fn getSystem() ?*TextureSystem {
     return context.get().texture;
 }
 
-// ========== Convenience functions ==========
+// ========== Public API (Used by Resource Manager) ==========
 
+/// Load texture synchronously (used by Resource Manager)
 pub fn loadFromFile(path: []const u8) u32 {
     const sys = getSystem() orelse return INVALID_TEXTURE_ID;
     return sys.loadFromFile(path);
 }
 
-pub fn loadFromFileWithOptions(path: []const u8, options: LoadOptions) u32 {
-    const sys = getSystem() orelse return INVALID_TEXTURE_ID;
-    return sys.loadFromFileWithOptions(path, options);
+/// Load texture asynchronously (used by Resource Manager)
+pub fn loadFromFileAsync(
+    path: []const u8,
+    options: LoadOptions,
+    callback: ?*const fn (u32) void,
+) !jobs.JobHandle {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    return sys.loadFromFileAsync(path, options, callback);
 }
+
+// ========== Internal/Legacy API ==========
 
 pub fn getTexture(id: u32) ?*resource_types.Texture {
     const sys = getSystem() orelse return null;
@@ -447,12 +672,6 @@ pub fn getTexture(id: u32) ?*resource_types.Texture {
 pub fn getDefaultTexture() ?*resource_types.Texture {
     const sys = getSystem() orelse return null;
     return sys.getDefaultTexture();
-}
-
-pub fn acquire(id: u32) void {
-    if (getSystem()) |sys| {
-        sys.acquire(id);
-    }
 }
 
 pub fn release(id: u32) void {

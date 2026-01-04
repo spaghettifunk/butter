@@ -26,6 +26,8 @@ const resource_types = @import("../resources/types.zig");
 const material_system = @import("material.zig");
 const obj_loader = @import("../loaders/obj_loader.zig");
 const gltf_loader = @import("../loaders/gltf_loader.zig");
+const jobs = @import("jobs.zig");
+const JobCounter = jobs.JobCounter;
 
 // ============================================================================
 // Constants
@@ -588,544 +590,40 @@ pub const GeometrySystem = struct {
 
     // ========== Procedural Generators ==========
 
-    /// Generate a plane geometry
+    /// Generate a plane geometry using parallel job system
     pub fn generatePlane(self: *GeometrySystem, config: PlaneConfig) ?*Geometry {
-        const x_segs = if (config.x_segments < 1) 1 else config.x_segments;
-        const y_segs = if (config.y_segments < 1) 1 else config.y_segments;
-
-        const vertex_count = (x_segs + 1) * (y_segs + 1);
-        // Double the index count for double-sided plane (visible from both above and below)
-        const index_count = x_segs * y_segs * 6 * 2;
-
-        const allocator = std.heap.page_allocator;
-
-        // Allocate temporary arrays - use simple Vertex3D format
-        const vertices = allocator.alloc(math_types.Vertex3D, vertex_count) catch {
-            logger.err("Failed to allocate vertices for plane generation", .{});
+        _ = self;
+        return generatePlaneParallel(config) catch |err| {
+            logger.err("Parallel plane generation failed: {}", .{err});
             return null;
         };
-        defer allocator.free(vertices);
-
-        const indices = allocator.alloc(u32, index_count) catch {
-            logger.err("Failed to allocate indices for plane generation", .{});
-            return null;
-        };
-        defer allocator.free(indices);
-
-        // Generate vertices
-        const half_width = config.width / 2.0;
-        const half_height = config.height / 2.0;
-
-        var v_idx: usize = 0;
-        for (0..y_segs + 1) |y| {
-            const v: f32 = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(y_segs));
-            for (0..x_segs + 1) |x| {
-                const u: f32 = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(x_segs));
-
-                vertices[v_idx] = .{
-                    .position = .{
-                        u * config.width - half_width,
-                        0.0,
-                        v * config.height - half_height,
-                    },
-                    .normal = .{ 0.0, 1.0, 0.0 },
-                    .texcoord = .{ u * config.tile_x, v * config.tile_y },
-                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
-                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-                };
-                v_idx += 1;
-            }
-        }
-
-        // Generate indices for plane visible from ABOVE (+Y direction)
-        // Vulkan uses Y-down in NDC, so we need CLOCKWISE winding in world space
-        // to get CCW in screen space (which is the front face).
-        //
-        // Vertex layout in XZ plane when looking down from +Y:
-        //   +Z (forward/up in view)
-        //    ^
-        //    |
-        //   bl (low x, high z) ----- br (high x, high z)
-        //    |                         |
-        //    |                         |
-        //   tl (low x, low z)  ----- tr (high x, low z)
-        //    |
-        //    +-----> +X (right)
-        //
-        // CW from +Y (for Vulkan): tl -> bl -> br, tl -> br -> tr
-        var i_idx: usize = 0;
-        for (0..y_segs) |y| {
-            for (0..x_segs) |x| {
-                const row_start = y * (x_segs + 1);
-                const next_row_start = (y + 1) * (x_segs + 1);
-
-                const tl: u32 = @intCast(row_start + x);
-                const tr: u32 = @intCast(row_start + x + 1);
-                const bl: u32 = @intCast(next_row_start + x);
-                const br: u32 = @intCast(next_row_start + x + 1);
-
-                // CW winding in world space (becomes CCW in Vulkan screen space)
-                // Visible from above (+Y)
-                indices[i_idx] = tl;
-                indices[i_idx + 1] = bl;
-                indices[i_idx + 2] = br;
-                indices[i_idx + 3] = tl;
-                indices[i_idx + 4] = br;
-                indices[i_idx + 5] = tr;
-                i_idx += 6;
-            }
-        }
-
-        // Add back-face indices (reversed winding for visibility from below -Y)
-        // CCW from +Y = CW from -Y (visible from below)
-        for (0..y_segs) |y| {
-            for (0..x_segs) |x| {
-                const row_start = y * (x_segs + 1);
-                const next_row_start = (y + 1) * (x_segs + 1);
-
-                const tl: u32 = @intCast(row_start + x);
-                const tr: u32 = @intCast(row_start + x + 1);
-                const bl: u32 = @intCast(next_row_start + x);
-                const br: u32 = @intCast(next_row_start + x + 1);
-
-                // CCW winding in world space (reversed from front face)
-                // Visible from below (-Y)
-                indices[i_idx] = tl;
-                indices[i_idx + 1] = br;
-                indices[i_idx + 2] = bl;
-                indices[i_idx + 3] = tl;
-                indices[i_idx + 4] = tr;
-                indices[i_idx + 5] = br;
-                i_idx += 6;
-            }
-        }
-
-        // Create geometry config
-        var geo_config: GeometryConfig = .{
-            .vertex_count = @intCast(vertex_count),
-
-            .vertices = vertices.ptr,
-            .index_count = @intCast(index_count),
-            .index_type = .u32,
-            .indices = indices.ptr,
-            .auto_release = config.auto_release,
-        };
-
-        // Copy name
-        const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
-
-        // Copy material name
-        const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
-
-        return self.acquireFromConfig(geo_config);
     }
 
-    /// Generate a cube geometry
+    /// Generate a cube geometry using parallel job system
     pub fn generateCube(self: *GeometrySystem, config: CubeConfig) ?*Geometry {
-        const allocator = std.heap.page_allocator;
-
-        // 24 vertices (4 per face for correct normals)
-        const vertex_count: usize = 24;
-        const index_count: usize = 36;
-
-        const vertices = allocator.alloc(math_types.Vertex3D, vertex_count) catch {
-            logger.err("Failed to allocate vertices for cube generation", .{});
+        _ = self;
+        return generateCubeParallel(config) catch |err| {
+            logger.err("Parallel cube generation failed: {}", .{err});
             return null;
         };
-        defer allocator.free(vertices);
-
-        const indices = allocator.alloc(u32, index_count) catch {
-            logger.err("Failed to allocate indices for cube generation", .{});
-            return null;
-        };
-        defer allocator.free(indices);
-
-        const hw = config.width / 2.0;
-        const hh = config.height / 2.0;
-        const hd = config.depth / 2.0;
-
-        // Define faces: vertices per face
-        const face_verts = [_][4][3]f32{
-            // Front (+Z)
-            .{ .{ -hw, -hh, hd }, .{ hw, -hh, hd }, .{ hw, hh, hd }, .{ -hw, hh, hd } },
-            // Back (-Z)
-            .{ .{ hw, -hh, -hd }, .{ -hw, -hh, -hd }, .{ -hw, hh, -hd }, .{ hw, hh, -hd } },
-            // Left (-X)
-            .{ .{ -hw, -hh, -hd }, .{ -hw, -hh, hd }, .{ -hw, hh, hd }, .{ -hw, hh, -hd } },
-            // Right (+X)
-            .{ .{ hw, -hh, hd }, .{ hw, -hh, -hd }, .{ hw, hh, -hd }, .{ hw, hh, hd } },
-            // Top (+Y)
-            .{ .{ -hw, hh, hd }, .{ hw, hh, hd }, .{ hw, hh, -hd }, .{ -hw, hh, -hd } },
-            // Bottom (-Y)
-            .{ .{ -hw, -hh, -hd }, .{ hw, -hh, -hd }, .{ hw, -hh, hd }, .{ -hw, -hh, hd } },
-        };
-
-        const uvs = [4][2]f32{
-            .{ 0.0, config.tile_y },
-            .{ config.tile_x, config.tile_y },
-            .{ config.tile_x, 0.0 },
-            .{ 0.0, 0.0 },
-        };
-
-        for (face_verts, 0..) |face, face_idx| {
-            const base_vertex: u32 = @intCast(face_idx * 4);
-            // Normals for this face
-
-            const face_normal = switch (face_idx) {
-                0 => [_]f32{ 0.0, 0.0, 1.0 }, // Front (+Z)
-                1 => [_]f32{ 0.0, 0.0, -1.0 }, // Back (-Z)
-                2 => [_]f32{ -1.0, 0.0, 0.0 }, // Left (-X)
-                3 => [_]f32{ 1.0, 0.0, 0.0 }, // Right (+X)
-                4 => [_]f32{ 0.0, 1.0, 0.0 }, // Top (+Y)
-                5 => [_]f32{ 0.0, -1.0, 0.0 }, // Bottom (-Y)
-                else => [_]f32{ 0.0, 1.0, 0.0 },
-            };
-
-            // Tangents for this face
-            const face_tangent = switch (face_idx) {
-                0 => [_]f32{ 1.0, 0.0, 0.0, 1.0 }, // Front (+Z) -> Right (+X)
-                1 => [_]f32{ -1.0, 0.0, 0.0, 1.0 }, // Back (-Z) -> Left (-X)
-                2 => [_]f32{ 0.0, 0.0, 1.0, 1.0 }, // Left (-X) -> Forward (+Z)
-                3 => [_]f32{ 0.0, 0.0, -1.0, 1.0 }, // Right (+X) -> Backward (-Z)
-                4 => [_]f32{ 1.0, 0.0, 0.0, 1.0 }, // Top (+Y) -> Right (+X)
-                5 => [_]f32{ 1.0, 0.0, 0.0, 1.0 }, // Bottom (-Y) -> Right (+X)
-                else => [_]f32{ 1.0, 0.0, 0.0, 1.0 },
-            };
-
-            for (face, 0..) |pos, vert_idx| {
-                vertices[face_idx * 4 + vert_idx] = .{
-                    .position = pos,
-                    .normal = face_normal,
-                    .texcoord = uvs[vert_idx],
-                    .tangent = face_tangent,
-                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-                };
-            }
-
-            // Indices for this face (CW winding in world space for Vulkan)
-            // Face vertices are defined CW: 0(bl) -> 1(br) -> 2(tr) -> 3(tl)
-            // CW in world space: 0 -> 1 -> 2 and 0 -> 2 -> 3
-            const i_base = face_idx * 6;
-            indices[i_base + 0] = base_vertex + 0;
-            indices[i_base + 1] = base_vertex + 1;
-            indices[i_base + 2] = base_vertex + 2;
-            indices[i_base + 3] = base_vertex + 0;
-            indices[i_base + 4] = base_vertex + 2;
-            indices[i_base + 5] = base_vertex + 3;
-        }
-
-        // Create geometry config
-        var geo_config: GeometryConfig = .{
-            .vertex_count = @intCast(vertex_count),
-
-            .vertices = vertices.ptr,
-            .index_count = @intCast(index_count),
-            .index_type = .u32,
-            .indices = indices.ptr,
-            .auto_release = config.auto_release,
-        };
-
-        // Copy names
-        const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
-
-        const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
-
-        return self.acquireFromConfig(geo_config);
     }
 
-    /// Generate a UV sphere geometry
+    /// Generate a UV sphere geometry using parallel job system
     pub fn generateSphere(self: *GeometrySystem, config: SphereConfig) ?*Geometry {
-        const rings = if (config.rings < 3) 3 else config.rings;
-        const sectors = if (config.sectors < 3) 3 else config.sectors;
-
-        const vertex_count = (rings + 1) * (sectors + 1);
-        const index_count = rings * sectors * 6;
-
-        const allocator = std.heap.page_allocator;
-
-        const vertices = allocator.alloc(math_types.Vertex3D, vertex_count) catch {
-            logger.err("Failed to allocate vertices for sphere generation", .{});
+        _ = self;
+        return generateSphereParallel(config) catch |err| {
+            logger.err("Parallel sphere generation failed: {}", .{err});
             return null;
         };
-        defer allocator.free(vertices);
-
-        const indices = allocator.alloc(u32, index_count) catch {
-            logger.err("Failed to allocate indices for sphere generation", .{});
-            return null;
-        };
-        defer allocator.free(indices);
-
-        // Generate vertices
-        var v_idx: usize = 0;
-        for (0..rings + 1) |ring| {
-            const phi: f32 = math.K_PI * @as(f32, @floatFromInt(ring)) / @as(f32, @floatFromInt(rings));
-            const sin_phi = @sin(phi);
-            const cos_phi = @cos(phi);
-
-            for (0..sectors + 1) |sector| {
-                const theta: f32 = 2.0 * math.K_PI * @as(f32, @floatFromInt(sector)) / @as(f32, @floatFromInt(sectors));
-                const sin_theta = @sin(theta);
-                const cos_theta = @cos(theta);
-
-                const x = sin_phi * cos_theta;
-                const y = cos_phi;
-                const z = sin_phi * sin_theta;
-
-                const u = @as(f32, @floatFromInt(sector)) / @as(f32, @floatFromInt(sectors));
-                const v = @as(f32, @floatFromInt(ring)) / @as(f32, @floatFromInt(rings));
-
-                // Normal is just the normalized position on unit sphere
-                const nx = x;
-                const ny = y;
-                const nz = z;
-
-                // Tangent calculation
-                // Tangent is along u direction (increasing theta, around Y axis)
-                // Derivative of position w.r.t. theta: (-sin_phi * sin_theta, 0, sin_phi * cos_theta)
-                const tx = -sin_theta;
-                const ty = 0.0;
-                const tz = cos_theta;
-
-                vertices[v_idx] = .{
-                    .position = .{ x * config.radius, y * config.radius, z * config.radius },
-                    .normal = .{ nx, ny, nz },
-                    .texcoord = .{ u, v },
-                    .tangent = .{ tx, ty, tz, 1.0 },
-                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-                };
-                v_idx += 1;
-            }
-        }
-
-        // Generate indices (CW winding in world space for Vulkan)
-        // For sphere: ring 0 is top (y=1), ring N is bottom (y=-1)
-        // tl/tr are higher (smaller ring), bl/br are lower (larger ring)
-        // Sectors increase going around Y axis (e.g., +X to +Z to -X...)
-        // CW from outside in world space -> CCW in Vulkan screen space
-        var i_idx: usize = 0;
-        for (0..rings) |ring| {
-            for (0..sectors) |sector| {
-                const row_start = ring * (sectors + 1);
-                const next_row_start = (ring + 1) * (sectors + 1);
-
-                const tl: u32 = @intCast(row_start + sector);
-                const tr: u32 = @intCast(row_start + sector + 1);
-                const bl: u32 = @intCast(next_row_start + sector);
-                const br: u32 = @intCast(next_row_start + sector + 1);
-
-                // CW winding from outside: tl -> bl -> tr, tr -> bl -> br
-                indices[i_idx] = tl;
-                indices[i_idx + 1] = bl;
-                indices[i_idx + 2] = tr;
-                indices[i_idx + 3] = tr;
-                indices[i_idx + 4] = bl;
-                indices[i_idx + 5] = br;
-                i_idx += 6;
-            }
-        }
-
-        // Create geometry config
-        var geo_config: GeometryConfig = .{
-            .vertex_count = @intCast(vertex_count),
-
-            .vertices = vertices.ptr,
-            .index_count = @intCast(index_count),
-            .index_type = .u32,
-            .indices = indices.ptr,
-            .auto_release = config.auto_release,
-        };
-
-        const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
-
-        const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
-
-        return self.acquireFromConfig(geo_config);
     }
 
-    /// Generate a cylinder geometry
+    /// Generate a cylinder geometry using parallel job system
     pub fn generateCylinder(self: *GeometrySystem, config: CylinderConfig) ?*Geometry {
-        const radial_segs = if (config.radial_segments < 3) 3 else config.radial_segments;
-        const height_segs = if (config.height_segments < 1) 1 else config.height_segments;
-
-        // Calculate vertex and index counts
-        var vertex_count: usize = (height_segs + 1) * (radial_segs + 1);
-        var index_count: usize = height_segs * radial_segs * 6;
-
-        if (!config.open_ended) {
-            vertex_count += (radial_segs + 1) * 2 + 2;
-            index_count += radial_segs * 3 * 2;
-        }
-
-        const allocator = std.heap.page_allocator;
-
-        const vertices = allocator.alloc(math_types.Vertex3D, vertex_count) catch {
-            logger.err("Failed to allocate vertices for cylinder generation", .{});
+        _ = self;
+        return generateCylinderParallel(config) catch |err| {
+            logger.err("Parallel cylinder generation failed: {}", .{err});
             return null;
         };
-        defer allocator.free(vertices);
-
-        const indices = allocator.alloc(u32, index_count) catch {
-            logger.err("Failed to allocate indices for cylinder generation", .{});
-            return null;
-        };
-        defer allocator.free(indices);
-
-        const half_height = config.height / 2.0;
-
-        // Generate side vertices
-        var v_idx: usize = 0;
-        for (0..height_segs + 1) |h| {
-            const v: f32 = @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(height_segs));
-            const y = v * config.height - half_height;
-            const radius = config.radius_bottom + (config.radius_top - config.radius_bottom) * v;
-
-            for (0..radial_segs + 1) |r| {
-                const u: f32 = @as(f32, @floatFromInt(r)) / @as(f32, @floatFromInt(radial_segs));
-                const theta = u * 2.0 * math.K_PI;
-                const cos_theta = @cos(theta);
-                const sin_theta = @sin(theta);
-
-                // Normal calculation for side
-                // Slope of the side
-                const slope = (config.radius_bottom - config.radius_top) / config.height;
-                // Normal vector (not normalized yet)
-                var nx = cos_theta;
-                var ny = slope;
-                var nz = sin_theta;
-                // Normalize
-                const len = @sqrt(nx * nx + ny * ny + nz * nz);
-                nx /= len;
-                ny /= len;
-                nz /= len;
-
-                vertices[v_idx] = .{
-                    .position = .{ radius * cos_theta, y, radius * sin_theta },
-                    .normal = .{ nx, ny, nz },
-                    .texcoord = .{ u, v },
-                    .tangent = .{ -sin_theta, 0.0, cos_theta, 1.0 },
-                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-                };
-                v_idx += 1;
-            }
-        }
-
-        // Generate side indices (CW winding in world space for Vulkan)
-        // For cylinder: h=0 is top, h=N is bottom
-        // Radial segments go around Y axis
-        // CW from outside in world space -> CCW in Vulkan screen space
-        var i_idx: usize = 0;
-        for (0..height_segs) |h| {
-            for (0..radial_segs) |r| {
-                const row_start = h * (radial_segs + 1);
-                const next_row_start = (h + 1) * (radial_segs + 1);
-
-                const tl: u32 = @intCast(row_start + r);
-                const tr: u32 = @intCast(row_start + r + 1);
-                const bl: u32 = @intCast(next_row_start + r);
-                const br: u32 = @intCast(next_row_start + r + 1);
-
-                // CW winding from outside: tl -> bl -> tr, tr -> bl -> br
-                indices[i_idx] = tl;
-                indices[i_idx + 1] = bl;
-                indices[i_idx + 2] = tr;
-                indices[i_idx + 3] = tr;
-                indices[i_idx + 4] = bl;
-                indices[i_idx + 5] = br;
-                i_idx += 6;
-            }
-        }
-
-        // Generate caps if not open ended
-        if (!config.open_ended) {
-            // Top cap center
-            const top_center_idx: u32 = @intCast(v_idx);
-            vertices[v_idx] = .{
-                .position = .{ 0.0, half_height, 0.0 },
-                .normal = .{ 0.0, 1.0, 0.0 },
-                .texcoord = .{ 0.5, 0.5 },
-                .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
-                .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-            };
-            v_idx += 1;
-
-            for (0..radial_segs + 1) |r| {
-                const u: f32 = @as(f32, @floatFromInt(r)) / @as(f32, @floatFromInt(radial_segs));
-                const theta = u * 2.0 * math.K_PI;
-                vertices[v_idx] = .{
-                    .position = .{ config.radius_top * @cos(theta), half_height, config.radius_top * @sin(theta) },
-                    .normal = .{ 0.0, 1.0, 0.0 },
-                    .texcoord = .{ @cos(theta) * 0.5 + 0.5, @sin(theta) * 0.5 + 0.5 },
-                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
-                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-                };
-                v_idx += 1;
-            }
-
-            // Top cap triangles (CCW when viewed from above)
-            for (0..radial_segs) |r| {
-                indices[i_idx] = top_center_idx;
-                indices[i_idx + 1] = @intCast(top_center_idx + 2 + r);
-                indices[i_idx + 2] = @intCast(top_center_idx + 1 + r);
-                i_idx += 3;
-            }
-
-            // Bottom cap center
-            const bottom_center_idx: u32 = @intCast(v_idx);
-            vertices[v_idx] = .{
-                .position = .{ 0.0, -half_height, 0.0 },
-                .normal = .{ 0.0, -1.0, 0.0 },
-                .texcoord = .{ 0.5, 0.5 },
-                .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
-                .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-            };
-            v_idx += 1;
-
-            for (0..radial_segs + 1) |r| {
-                const u: f32 = @as(f32, @floatFromInt(r)) / @as(f32, @floatFromInt(radial_segs));
-                const theta = u * 2.0 * math.K_PI;
-                vertices[v_idx] = .{
-                    .position = .{ config.radius_bottom * @cos(theta), -half_height, config.radius_bottom * @sin(theta) },
-                    .normal = .{ 0.0, -1.0, 0.0 },
-                    .texcoord = .{ @cos(theta) * 0.5 + 0.5, @sin(theta) * 0.5 + 0.5 },
-                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
-                    .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
-                };
-                v_idx += 1;
-            }
-
-            // Bottom cap triangles (CCW when viewed from below)
-            for (0..radial_segs) |r| {
-                indices[i_idx] = bottom_center_idx;
-                indices[i_idx + 1] = @intCast(bottom_center_idx + 1 + r);
-                indices[i_idx + 2] = @intCast(bottom_center_idx + 2 + r);
-                i_idx += 3;
-            }
-        }
-
-        // Create geometry config
-        var geo_config: GeometryConfig = .{
-            .vertex_count = @intCast(v_idx),
-
-            .vertices = vertices.ptr,
-            .index_count = @intCast(i_idx),
-            .index_type = .u32,
-            .indices = indices.ptr,
-            .auto_release = config.auto_release,
-        };
-
-        const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
-
-        const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
-        @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
-
-        return self.acquireFromConfig(geo_config);
     }
 
     /// Generate a cone geometry (cylinder with top radius = 0)
@@ -1439,6 +937,177 @@ pub const GeometrySystem = struct {
 
         return null; // No free slots
     }
+
+    // ========== Async Loading API ==========
+
+    /// Async geometry loading arguments
+    const AsyncLoadArgs = struct {
+        path_copy: []const u8,
+        callback: ?*const fn (?*Geometry) void,
+    };
+
+    /// Load geometry asynchronously using job system
+    /// Returns job handle that can be waited on
+    /// Callback is invoked on main thread when loading completes
+    pub fn loadFromFileAsync(
+        self: *GeometrySystem,
+        path: []const u8,
+        callback: ?*const fn (?*Geometry) void,
+    ) !jobs.JobHandle {
+        // Check cache first
+        if (self.name_lookup.get(path)) |existing_id| {
+            const idx = existing_id - 1;
+            self.geometries[idx].ref_count += 1;
+            logger.debug("Geometry cache hit (async): {s} (id={}, ref_count={})", .{ path, existing_id, self.geometries[idx].ref_count });
+
+            // Immediately invoke callback with cached geometry
+            if (callback) |cb| {
+                cb(&self.geometries[idx].geometry);
+            }
+
+            // Return invalid handle since job didn't run
+            return jobs.INVALID_JOB_HANDLE;
+        }
+
+        // Duplicate path for the job (freed in job function)
+        const path_copy = try std.heap.page_allocator.dupe(u8, path);
+        errdefer std.heap.page_allocator.free(path_copy);
+
+        const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+        // Submit background job for file I/O and parsing
+        const load_handle = try jobs_sys.submit(asyncLoadJob, .{AsyncLoadArgs{
+            .path_copy = path_copy,
+            .callback = callback,
+        }});
+
+        return load_handle;
+    }
+
+    /// Background job that loads geometry from file
+    fn asyncLoadJob(args: AsyncLoadArgs) void {
+        defer std.heap.page_allocator.free(args.path_copy);
+
+        _ = getSystem() orelse {
+            logger.err("Geometry system not available in async load job", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Detect format from extension
+        const ext = getFileExtension(args.path_copy);
+        const allocator = std.heap.page_allocator;
+
+        // Load based on format
+        var load_result: ?struct {
+            vertices: []math_types.Vertex3D,
+            indices: []u32,
+        } = null;
+
+        if (std.mem.eql(u8, ext, "obj")) {
+            const result = obj_loader.loadObj(allocator, args.path_copy) orelse {
+                logger.err("Failed to load OBJ file (async): {s}", .{args.path_copy});
+                if (args.callback) |cb| cb(null);
+                return;
+            };
+            load_result = .{
+                .vertices = result.vertices,
+                .indices = result.indices,
+            };
+        } else if (std.mem.eql(u8, ext, "gltf") or std.mem.eql(u8, ext, "glb")) {
+            const result = gltf_loader.loadGltf(allocator, args.path_copy) orelse {
+                logger.err("Failed to load glTF file (async): {s}", .{args.path_copy});
+                if (args.callback) |cb| cb(null);
+                return;
+            };
+            load_result = .{
+                .vertices = result.vertices,
+                .indices = result.indices,
+            };
+        } else {
+            logger.err("Unsupported geometry format (async): {s}", .{ext});
+            if (args.callback) |cb| cb(null);
+            return;
+        }
+
+        const result = load_result.?;
+
+        // Copy path for main thread
+        const path_for_creation = std.heap.page_allocator.dupe(u8, args.path_copy) catch {
+            allocator.free(result.vertices);
+            allocator.free(result.indices);
+            logger.err("Failed to duplicate path for geometry creation", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Submit GPU upload job to main thread
+        const upload_args = AsyncUploadArgs{
+            .path = path_for_creation,
+            .vertices = result.vertices,
+            .indices = result.indices,
+            .callback = args.callback,
+        };
+
+        const jobs_sys = context.get().jobs orelse {
+            allocator.free(result.vertices);
+            allocator.free(result.indices);
+            std.heap.page_allocator.free(path_for_creation);
+            logger.err("Job system not available for geometry upload", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        _ = jobs_sys.submitMainThread(asyncUploadJob, .{upload_args}) catch {
+            allocator.free(result.vertices);
+            allocator.free(result.indices);
+            std.heap.page_allocator.free(path_for_creation);
+            logger.err("Failed to submit geometry upload job", .{});
+            if (args.callback) |cb| cb(null);
+        };
+    }
+
+    /// Arguments for GPU upload job
+    const AsyncUploadArgs = struct {
+        path: []const u8,
+        vertices: []math_types.Vertex3D,
+        indices: []u32,
+        callback: ?*const fn (?*Geometry) void,
+    };
+
+    /// Main-thread job that uploads geometry to GPU
+    fn asyncUploadJob(args: AsyncUploadArgs) void {
+        const allocator = std.heap.page_allocator;
+        defer allocator.free(args.vertices);
+        defer allocator.free(args.indices);
+        defer allocator.free(args.path);
+
+        const sys = getSystem() orelse {
+            logger.err("Geometry system not available in GPU upload job", .{});
+            if (args.callback) |cb| cb(null);
+            return;
+        };
+
+        // Create geometry from loaded data
+        const geom = sys.createFromData(
+            args.path,
+            args.vertices,
+            args.indices,
+        );
+
+        if (geom == null) {
+            logger.err("Failed to create geometry (async): {s}", .{args.path});
+            if (args.callback) |cb| cb(null);
+            return;
+        }
+
+        logger.info("Geometry loaded asynchronously: {s} (id={})", .{ args.path, geom.?.id });
+
+        // Invoke callback
+        if (args.callback) |cb| {
+            cb(geom);
+        }
+    }
 };
 
 // ============================================================================
@@ -1497,20 +1166,894 @@ pub fn getSystem() ?*GeometrySystem {
     return context.get().geometry;
 }
 
-pub fn acquireFromConfig(config: GeometryConfig) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.acquireFromConfig(config);
-}
+// ========== Public API (Used by Resource Manager) ==========
 
+/// Load geometry synchronously (used by Resource Manager)
 pub fn acquire(name: []const u8) ?*Geometry {
     const sys = getSystem() orelse return null;
     return sys.acquire(name);
 }
 
-pub fn acquireById(id: u32) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.acquireById(id);
+/// Load geometry asynchronously (used by Resource Manager)
+pub fn loadFromFileAsync(
+    path: []const u8,
+    callback: ?*const fn (?*Geometry) void,
+) !jobs.JobHandle {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    return sys.loadFromFileAsync(path, callback);
 }
+
+/// Generate plane geometry (used by Resource Manager)
+pub fn generatePlane(config: PlaneConfig) ?*Geometry {
+    const sys = getSystem() orelse {
+        logger.err("CRITICAL: GeometrySystem not available in context when generating plane", .{});
+        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
+        return null;
+    };
+    const result = sys.generatePlane(config);
+    if (result) |geo| {
+        logger.debug("[GEOMETRY] generatePlane returned geometry with ID: {}", .{geo.id});
+    }
+    return result;
+}
+
+/// Generate cube geometry (used by Resource Manager)
+pub fn generateCube(config: CubeConfig) ?*Geometry {
+    const sys = getSystem() orelse {
+        logger.err("CRITICAL: GeometrySystem not available in context when generating cube", .{});
+        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
+        return null;
+    };
+    const result = sys.generateCube(config);
+    if (result) |geo| {
+        logger.debug("[GEOMETRY] generateCube returned geometry with ID: {}", .{geo.id});
+    }
+    return result;
+}
+
+/// Generate sphere geometry (used by Resource Manager)
+pub fn generateSphere(config: SphereConfig) ?*Geometry {
+    const sys = getSystem() orelse {
+        logger.err("CRITICAL: GeometrySystem not available in context when generating sphere", .{});
+        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
+        return null;
+    };
+    const result = sys.generateSphere(config);
+    if (result) |geo| {
+        logger.debug("[GEOMETRY] generateSphere returned geometry with ID: {}", .{geo.id});
+    }
+    return result;
+}
+
+/// Generate cylinder geometry (used by Resource Manager)
+pub fn generateCylinder(config: CylinderConfig) ?*Geometry {
+    const sys = getSystem() orelse return null;
+    return sys.generateCylinder(config);
+}
+
+/// Generate cone geometry (used by Resource Manager)
+pub fn generateCone(config: ConeConfig) ?*Geometry {
+    const sys = getSystem() orelse return null;
+    return sys.generateCone(config);
+}
+
+// ========== Parallel Geometry Operations ==========
+
+/// Helper structure for parallel bounding box computation
+const BoundingBoxResult = struct {
+    min_pos: [3]f32,
+    max_pos: [3]f32,
+};
+
+/// Compute bounding box in parallel using Job System
+/// Returns bounding box for all vertices
+pub fn computeBoundingBoxParallel(vertices: []const math_types.Vertex3D) !struct { min: [3]f32, max: [3]f32, center: [3]f32, radius: f32 } {
+    if (vertices.len == 0) {
+        return .{
+            .min = .{ 0, 0, 0 },
+            .max = .{ 0, 0, 0 },
+            .center = .{ 0, 0, 0 },
+            .radius = 0,
+        };
+    }
+
+    const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+    // Batch size of 256 vertices per job for good parallelization
+    const batch_size: usize = 256;
+    const batch_count = (vertices.len + batch_size - 1) / batch_size;
+
+    // Allocate results array for each batch
+    const allocator = std.heap.page_allocator;
+    const batch_results = try allocator.alloc(BoundingBoxResult, batch_count);
+    defer allocator.free(batch_results);
+
+    // Initialize results
+    for (batch_results) |*result| {
+        result.min_pos = .{ std.math.floatMax(f32), std.math.floatMax(f32), std.math.floatMax(f32) };
+        result.max_pos = .{ -std.math.floatMax(f32), -std.math.floatMax(f32), -std.math.floatMax(f32) };
+    }
+
+    // Submit parallel jobs for bounding box computation
+    const counter = try jobs_sys.counter_pool.allocate();
+    counter.init(@intCast(batch_count));
+    const generation = counter.generation.load(.acquire);
+
+    const ComputeBatchArgs = struct {
+        batch_vertices: []const math_types.Vertex3D,
+        result: *BoundingBoxResult,
+        counter: *JobCounter,
+    };
+
+    const computeBatchBounds = struct {
+        fn execute(args: ComputeBatchArgs) void {
+            var min_pos = args.result.min_pos;
+            var max_pos = args.result.max_pos;
+
+            for (args.batch_vertices) |vertex| {
+                const pos = vertex.position;
+                min_pos[0] = @min(min_pos[0], pos[0]);
+                min_pos[1] = @min(min_pos[1], pos[1]);
+                min_pos[2] = @min(min_pos[2], pos[2]);
+                max_pos[0] = @max(max_pos[0], pos[0]);
+                max_pos[1] = @max(max_pos[1], pos[1]);
+                max_pos[2] = @max(max_pos[2], pos[2]);
+            }
+
+            args.result.min_pos = min_pos;
+            args.result.max_pos = max_pos;
+            _ = args.counter.decrement();
+        }
+    }.execute;
+
+    // Submit jobs for each batch
+    var i: usize = 0;
+    while (i < batch_count) : (i += 1) {
+        const start = i * batch_size;
+        const end = @min(start + batch_size, vertices.len);
+        const batch = vertices[start..end];
+
+        const args = ComputeBatchArgs{
+            .batch_vertices = batch,
+            .result = &batch_results[i],
+            .counter = counter,
+        };
+
+        _ = try jobs_sys.submit(computeBatchBounds, .{args});
+    }
+
+    // Wait for all batches to complete
+    const handle = jobs.JobHandle{ .counter = counter, .generation = generation };
+    jobs_sys.wait(handle);
+    jobs_sys.counter_pool.release(counter);
+
+    // Combine results from all batches
+    var final_min: [3]f32 = .{ std.math.floatMax(f32), std.math.floatMax(f32), std.math.floatMax(f32) };
+    var final_max: [3]f32 = .{ -std.math.floatMax(f32), -std.math.floatMax(f32), -std.math.floatMax(f32) };
+
+    for (batch_results) |result| {
+        final_min[0] = @min(final_min[0], result.min_pos[0]);
+        final_min[1] = @min(final_min[1], result.min_pos[1]);
+        final_min[2] = @min(final_min[2], result.min_pos[2]);
+        final_max[0] = @max(final_max[0], result.max_pos[0]);
+        final_max[1] = @max(final_max[1], result.max_pos[1]);
+        final_max[2] = @max(final_max[2], result.max_pos[2]);
+    }
+
+    // Compute center and radius
+    const center: [3]f32 = .{
+        (final_min[0] + final_max[0]) / 2.0,
+        (final_min[1] + final_max[1]) / 2.0,
+        (final_min[2] + final_max[2]) / 2.0,
+    };
+
+    const dx = final_max[0] - final_min[0];
+    const dy = final_max[1] - final_min[1];
+    const dz = final_max[2] - final_min[2];
+    const radius = @sqrt(dx * dx + dy * dy + dz * dz) / 2.0;
+
+    return .{
+        .min = final_min,
+        .max = final_max,
+        .center = center,
+        .radius = radius,
+    };
+}
+
+/// Generate sphere with parallel vertex/index generation
+pub fn generateSphereParallel(config: SphereConfig) !?*Geometry {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+    const rings = if (config.rings < 3) 3 else config.rings;
+    const sectors = if (config.sectors < 3) 3 else config.sectors;
+
+    const vertex_count = (rings + 1) * (sectors + 1);
+    const index_count = rings * sectors * 6;
+
+    const allocator = std.heap.page_allocator;
+    const vertices = try allocator.alloc(math_types.Vertex3D, vertex_count);
+    defer allocator.free(vertices);
+
+    const indices = try allocator.alloc(u32, index_count);
+    defer allocator.free(indices);
+
+    // Parallel vertex generation (one job per ring)
+    const vertex_counter = try jobs_sys.counter_pool.allocate();
+    vertex_counter.init(@intCast(rings + 1));
+    const vertex_generation = vertex_counter.generation.load(.acquire);
+
+    const VertexGenArgs = struct {
+        ring: u32,
+        rings: u32,
+        sectors: u32,
+        radius: f32,
+        color: [3]f32,
+        vertices: []math_types.Vertex3D,
+        counter: *JobCounter,
+    };
+
+    const generateRingVertices = struct {
+        fn execute(args: VertexGenArgs) void {
+            const phi: f32 = math.K_PI * @as(f32, @floatFromInt(args.ring)) / @as(f32, @floatFromInt(args.rings));
+            const sin_phi = @sin(phi);
+            const cos_phi = @cos(phi);
+
+            for (0..args.sectors + 1) |sector| {
+                const theta: f32 = 2.0 * math.K_PI * @as(f32, @floatFromInt(sector)) / @as(f32, @floatFromInt(args.sectors));
+                const sin_theta = @sin(theta);
+                const cos_theta = @cos(theta);
+
+                const x = sin_phi * cos_theta;
+                const y = cos_phi;
+                const z = sin_phi * sin_theta;
+
+                const u = @as(f32, @floatFromInt(sector)) / @as(f32, @floatFromInt(args.sectors));
+                const v = @as(f32, @floatFromInt(args.ring)) / @as(f32, @floatFromInt(args.rings));
+
+                const v_idx = args.ring * (args.sectors + 1) + @as(u32, @intCast(sector));
+                args.vertices[v_idx] = .{
+                    .position = .{ x * args.radius, y * args.radius, z * args.radius },
+                    .normal = .{ x, y, z },
+                    .texcoord = .{ u, v },
+                    .tangent = .{ -sin_theta, 0.0, cos_theta, 1.0 },
+                    .color = .{ args.color[0], args.color[1], args.color[2], 1.0 },
+                };
+            }
+
+            _ = args.counter.decrement();
+        }
+    }.execute;
+
+    // Submit vertex generation jobs (one per ring)
+    for (0..rings + 1) |ring| {
+        const args = VertexGenArgs{
+            .ring = @intCast(ring),
+            .rings = rings,
+            .sectors = sectors,
+            .radius = config.radius,
+            .color = config.color,
+            .vertices = vertices,
+            .counter = vertex_counter,
+        };
+        _ = try jobs_sys.submit(generateRingVertices, .{args});
+    }
+
+    const vertex_handle = jobs.JobHandle{ .counter = vertex_counter, .generation = vertex_generation };
+    jobs_sys.wait(vertex_handle);
+    jobs_sys.counter_pool.release(vertex_counter);
+
+    // Parallel index generation (batch by triangle strips)
+    const index_batch_size: usize = 4; // Process 4 rings per batch
+    const index_batch_count = (rings + index_batch_size - 1) / index_batch_size;
+
+    const index_counter = try jobs_sys.counter_pool.allocate();
+    index_counter.init(@intCast(index_batch_count));
+    const index_generation = index_counter.generation.load(.acquire);
+
+    const IndexGenArgs = struct {
+        ring_start: u32,
+        ring_end: u32,
+        sectors: u32,
+        indices: []u32,
+        counter: *JobCounter,
+    };
+
+    const generateRingIndices = struct {
+        fn execute(args: IndexGenArgs) void {
+            for (args.ring_start..args.ring_end) |ring| {
+                for (0..args.sectors) |sector| {
+                    const row_start = ring * (args.sectors + 1);
+                    const next_row_start = (ring + 1) * (args.sectors + 1);
+
+                    const tl: u32 = @intCast(row_start + sector);
+                    const tr: u32 = @intCast(row_start + sector + 1);
+                    const bl: u32 = @intCast(next_row_start + sector);
+                    const br: u32 = @intCast(next_row_start + sector + 1);
+
+                    const base_idx = (ring * args.sectors + @as(u32, @intCast(sector))) * 6;
+                    args.indices[base_idx + 0] = tl;
+                    args.indices[base_idx + 1] = bl;
+                    args.indices[base_idx + 2] = tr;
+                    args.indices[base_idx + 3] = tr;
+                    args.indices[base_idx + 4] = bl;
+                    args.indices[base_idx + 5] = br;
+                }
+            }
+            _ = args.counter.decrement();
+        }
+    }.execute;
+
+    // Submit index generation jobs
+    var batch: usize = 0;
+    while (batch < index_batch_count) : (batch += 1) {
+        const ring_start = batch * index_batch_size;
+        const ring_end = @min(ring_start + index_batch_size, rings);
+
+        const args = IndexGenArgs{
+            .ring_start = @intCast(ring_start),
+            .ring_end = @intCast(ring_end),
+            .sectors = sectors,
+            .indices = indices,
+            .counter = index_counter,
+        };
+        _ = try jobs_sys.submit(generateRingIndices, .{args});
+    }
+
+    const index_handle = jobs.JobHandle{ .counter = index_counter, .generation = index_generation };
+    jobs_sys.wait(index_handle);
+    jobs_sys.counter_pool.release(index_counter);
+
+    // Create geometry config
+    var geo_config: GeometryConfig = .{
+        .vertex_count = @intCast(vertex_count),
+        .vertices = vertices.ptr,
+        .index_count = @intCast(index_count),
+        .index_type = .u32,
+        .indices = indices.ptr,
+        .auto_release = config.auto_release,
+    };
+
+    const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
+
+    const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
+
+    return sys.acquireFromConfig(geo_config);
+}
+
+/// Generate plane with parallel vertex/index generation
+pub fn generatePlaneParallel(config: PlaneConfig) !?*Geometry {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+    const x_segs = if (config.x_segments < 1) 1 else config.x_segments;
+    const y_segs = if (config.y_segments < 1) 1 else config.y_segments;
+
+    const vertex_count = (x_segs + 1) * (y_segs + 1);
+    const index_count = x_segs * y_segs * 6 * 2; // Double-sided
+
+    const allocator = std.heap.page_allocator;
+    const vertices = try allocator.alloc(math_types.Vertex3D, vertex_count);
+    defer allocator.free(vertices);
+
+    const indices = try allocator.alloc(u32, index_count);
+    defer allocator.free(indices);
+
+    // Parallel vertex generation (one job per row)
+    const vertex_counter = try jobs_sys.counter_pool.allocate();
+    vertex_counter.init(@intCast(y_segs + 1));
+    const vertex_generation = vertex_counter.generation.load(.acquire);
+
+    const VertexGenArgs = struct {
+        y_row: u32,
+        x_segs: u32,
+        y_segs: u32,
+        width: f32,
+        height: f32,
+        tile_x: f32,
+        tile_y: f32,
+        color: [3]f32,
+        vertices: []math_types.Vertex3D,
+        counter: *JobCounter,
+    };
+
+    const generateRowVertices = struct {
+        fn execute(args: VertexGenArgs) void {
+            const half_width = args.width / 2.0;
+            const half_height = args.height / 2.0;
+            const v: f32 = @as(f32, @floatFromInt(args.y_row)) / @as(f32, @floatFromInt(args.y_segs));
+
+            for (0..args.x_segs + 1) |x| {
+                const u: f32 = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(args.x_segs));
+                const v_idx = args.y_row * (args.x_segs + 1) + @as(u32, @intCast(x));
+
+                args.vertices[v_idx] = .{
+                    .position = .{
+                        u * args.width - half_width,
+                        0.0,
+                        v * args.height - half_height,
+                    },
+                    .normal = .{ 0.0, 1.0, 0.0 },
+                    .texcoord = .{ u * args.tile_x, v * args.tile_y },
+                    .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                    .color = .{ args.color[0], args.color[1], args.color[2], 1.0 },
+                };
+            }
+
+            _ = args.counter.decrement();
+        }
+    }.execute;
+
+    // Submit vertex generation jobs (one per row)
+    for (0..y_segs + 1) |y_row| {
+        const args = VertexGenArgs{
+            .y_row = @intCast(y_row),
+            .x_segs = x_segs,
+            .y_segs = y_segs,
+            .width = config.width,
+            .height = config.height,
+            .tile_x = config.tile_x,
+            .tile_y = config.tile_y,
+            .color = config.color,
+            .vertices = vertices,
+            .counter = vertex_counter,
+        };
+        _ = try jobs_sys.submit(generateRowVertices, .{args});
+    }
+
+    const vertex_handle = jobs.JobHandle{ .counter = vertex_counter, .generation = vertex_generation };
+    jobs_sys.wait(vertex_handle);
+    jobs_sys.counter_pool.release(vertex_counter);
+
+    // Generate indices (could parallelize but overhead likely not worth it for planes)
+    // Front face
+    var i_idx: usize = 0;
+    for (0..y_segs) |y| {
+        for (0..x_segs) |x| {
+            const row_start = y * (x_segs + 1);
+            const next_row_start = (y + 1) * (x_segs + 1);
+
+            const tl: u32 = @intCast(row_start + x);
+            const tr: u32 = @intCast(row_start + x + 1);
+            const bl: u32 = @intCast(next_row_start + x);
+            const br: u32 = @intCast(next_row_start + x + 1);
+
+            indices[i_idx] = tl;
+            indices[i_idx + 1] = bl;
+            indices[i_idx + 2] = br;
+            indices[i_idx + 3] = tl;
+            indices[i_idx + 4] = br;
+            indices[i_idx + 5] = tr;
+            i_idx += 6;
+        }
+    }
+
+    // Back face (reversed winding)
+    for (0..y_segs) |y| {
+        for (0..x_segs) |x| {
+            const row_start = y * (x_segs + 1);
+            const next_row_start = (y + 1) * (x_segs + 1);
+
+            const tl: u32 = @intCast(row_start + x);
+            const tr: u32 = @intCast(row_start + x + 1);
+            const bl: u32 = @intCast(next_row_start + x);
+            const br: u32 = @intCast(next_row_start + x + 1);
+
+            indices[i_idx] = tl;
+            indices[i_idx + 1] = br;
+            indices[i_idx + 2] = bl;
+            indices[i_idx + 3] = tl;
+            indices[i_idx + 4] = tr;
+            indices[i_idx + 5] = br;
+            i_idx += 6;
+        }
+    }
+
+    // Create geometry config
+    var geo_config: GeometryConfig = .{
+        .vertex_count = @intCast(vertex_count),
+        .vertices = vertices.ptr,
+        .index_count = @intCast(index_count),
+        .index_type = .u32,
+        .indices = indices.ptr,
+        .auto_release = config.auto_release,
+    };
+
+    const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
+
+    const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
+
+    return sys.acquireFromConfig(geo_config);
+}
+
+/// Generate cube with parallel face generation
+pub fn generateCubeParallel(config: CubeConfig) !?*Geometry {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+    const allocator = std.heap.page_allocator;
+
+    // 24 vertices (4 per face for correct normals)
+    const vertex_count: usize = 24;
+    const index_count: usize = 36;
+
+    const vertices = try allocator.alloc(math_types.Vertex3D, vertex_count);
+    defer allocator.free(vertices);
+
+    const indices = try allocator.alloc(u32, index_count);
+    defer allocator.free(indices);
+
+    const hw = config.width / 2.0;
+    const hh = config.height / 2.0;
+    const hd = config.depth / 2.0;
+
+    // Parallel face generation (one job per face)
+    const face_counter = try jobs_sys.counter_pool.allocate();
+    face_counter.init(6); // 6 faces
+    const face_generation = face_counter.generation.load(.acquire);
+
+    const FaceGenArgs = struct {
+        face_idx: u32,
+        hw: f32,
+        hh: f32,
+        hd: f32,
+        tile_x: f32,
+        tile_y: f32,
+        color: [3]f32,
+        vertices: []math_types.Vertex3D,
+        indices: []u32,
+        counter: *JobCounter,
+    };
+
+    const generateFace = struct {
+        fn execute(args: FaceGenArgs) void {
+            const face_idx = args.face_idx;
+            const base_vertex = face_idx * 4;
+
+            // Define face vertices
+            const face_verts = switch (face_idx) {
+                0 => [4][3]f32{ // Front (+Z)
+                    .{ -args.hw, -args.hh, args.hd },
+                    .{ args.hw, -args.hh, args.hd },
+                    .{ args.hw, args.hh, args.hd },
+                    .{ -args.hw, args.hh, args.hd },
+                },
+                1 => [4][3]f32{ // Back (-Z)
+                    .{ args.hw, -args.hh, -args.hd },
+                    .{ -args.hw, -args.hh, -args.hd },
+                    .{ -args.hw, args.hh, -args.hd },
+                    .{ args.hw, args.hh, -args.hd },
+                },
+                2 => [4][3]f32{ // Left (-X)
+                    .{ -args.hw, -args.hh, -args.hd },
+                    .{ -args.hw, -args.hh, args.hd },
+                    .{ -args.hw, args.hh, args.hd },
+                    .{ -args.hw, args.hh, -args.hd },
+                },
+                3 => [4][3]f32{ // Right (+X)
+                    .{ args.hw, -args.hh, args.hd },
+                    .{ args.hw, -args.hh, -args.hd },
+                    .{ args.hw, args.hh, -args.hd },
+                    .{ args.hw, args.hh, args.hd },
+                },
+                4 => [4][3]f32{ // Top (+Y)
+                    .{ -args.hw, args.hh, args.hd },
+                    .{ args.hw, args.hh, args.hd },
+                    .{ args.hw, args.hh, -args.hd },
+                    .{ -args.hw, args.hh, -args.hd },
+                },
+                5 => [4][3]f32{ // Bottom (-Y)
+                    .{ -args.hw, -args.hh, -args.hd },
+                    .{ args.hw, -args.hh, -args.hd },
+                    .{ args.hw, -args.hh, args.hd },
+                    .{ -args.hw, -args.hh, args.hd },
+                },
+                else => [_][3]f32{.{ 0, 0, 0 }} ** 4,
+            };
+
+            const face_normal = switch (face_idx) {
+                0 => [3]f32{ 0.0, 0.0, 1.0 },
+                1 => [3]f32{ 0.0, 0.0, -1.0 },
+                2 => [3]f32{ -1.0, 0.0, 0.0 },
+                3 => [3]f32{ 1.0, 0.0, 0.0 },
+                4 => [3]f32{ 0.0, 1.0, 0.0 },
+                5 => [3]f32{ 0.0, -1.0, 0.0 },
+                else => [3]f32{ 0.0, 1.0, 0.0 },
+            };
+
+            const face_tangent = switch (face_idx) {
+                0 => [4]f32{ 1.0, 0.0, 0.0, 1.0 },
+                1 => [4]f32{ -1.0, 0.0, 0.0, 1.0 },
+                2 => [4]f32{ 0.0, 0.0, 1.0, 1.0 },
+                3 => [4]f32{ 0.0, 0.0, -1.0, 1.0 },
+                4 => [4]f32{ 1.0, 0.0, 0.0, 1.0 },
+                5 => [4]f32{ 1.0, 0.0, 0.0, 1.0 },
+                else => [4]f32{ 1.0, 0.0, 0.0, 1.0 },
+            };
+
+            const uvs = [4][2]f32{
+                .{ 0.0, args.tile_y },
+                .{ args.tile_x, args.tile_y },
+                .{ args.tile_x, 0.0 },
+                .{ 0.0, 0.0 },
+            };
+
+            // Generate vertices for this face
+            for (face_verts, 0..) |pos, vert_idx| {
+                args.vertices[base_vertex + vert_idx] = .{
+                    .position = pos,
+                    .normal = face_normal,
+                    .texcoord = uvs[vert_idx],
+                    .tangent = face_tangent,
+                    .color = .{ args.color[0], args.color[1], args.color[2], 1.0 },
+                };
+            }
+
+            // Generate indices for this face
+            const i_base = face_idx * 6;
+            args.indices[i_base + 0] = base_vertex + 0;
+            args.indices[i_base + 1] = base_vertex + 1;
+            args.indices[i_base + 2] = base_vertex + 2;
+            args.indices[i_base + 3] = base_vertex + 0;
+            args.indices[i_base + 4] = base_vertex + 2;
+            args.indices[i_base + 5] = base_vertex + 3;
+
+            _ = args.counter.decrement();
+        }
+    }.execute;
+
+    // Submit jobs for each face
+    for (0..6) |face| {
+        const args = FaceGenArgs{
+            .face_idx = @intCast(face),
+            .hw = hw,
+            .hh = hh,
+            .hd = hd,
+            .tile_x = config.tile_x,
+            .tile_y = config.tile_y,
+            .color = config.color,
+            .vertices = vertices,
+            .indices = indices,
+            .counter = face_counter,
+        };
+        _ = try jobs_sys.submit(generateFace, .{args});
+    }
+
+    const face_handle = jobs.JobHandle{ .counter = face_counter, .generation = face_generation };
+    jobs_sys.wait(face_handle);
+    jobs_sys.counter_pool.release(face_counter);
+
+    // Create geometry config
+    var geo_config: GeometryConfig = .{
+        .vertex_count = @intCast(vertex_count),
+        .vertices = vertices.ptr,
+        .index_count = @intCast(index_count),
+        .index_type = .u32,
+        .indices = indices.ptr,
+        .auto_release = config.auto_release,
+    };
+
+    const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
+
+    const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
+
+    return sys.acquireFromConfig(geo_config);
+}
+
+/// Generate cylinder with parallel ring generation
+pub fn generateCylinderParallel(config: CylinderConfig) !?*Geometry {
+    const sys = getSystem() orelse return error.SystemNotInitialized;
+    const jobs_sys = context.get().jobs orelse return error.JobSystemNotInitialized;
+
+    const radial_segs = if (config.radial_segments < 3) 3 else config.radial_segments;
+    const height_segs = if (config.height_segments < 1) 1 else config.height_segments;
+
+    var vertex_count: usize = (height_segs + 1) * (radial_segs + 1);
+    var index_count: usize = height_segs * radial_segs * 6;
+
+    if (!config.open_ended) {
+        vertex_count += (radial_segs + 1) * 2 + 2;
+        index_count += radial_segs * 3 * 2;
+    }
+
+    const allocator = std.heap.page_allocator;
+    const vertices = try allocator.alloc(math_types.Vertex3D, vertex_count);
+    defer allocator.free(vertices);
+
+    const indices = try allocator.alloc(u32, index_count);
+    defer allocator.free(indices);
+
+    const half_height = config.height / 2.0;
+
+    // Parallel side vertex generation (one job per ring)
+    const vertex_counter = try jobs_sys.counter_pool.allocate();
+    vertex_counter.init(@intCast(height_segs + 1));
+    const vertex_generation = vertex_counter.generation.load(.acquire);
+
+    const RingGenArgs = struct {
+        h: u32,
+        height_segs: u32,
+        radial_segs: u32,
+        height: f32,
+        radius_top: f32,
+        radius_bottom: f32,
+        half_height: f32,
+        color: [3]f32,
+        vertices: []math_types.Vertex3D,
+        counter: *JobCounter,
+    };
+
+    const generateRing = struct {
+        fn execute(args: RingGenArgs) void {
+            const v: f32 = @as(f32, @floatFromInt(args.h)) / @as(f32, @floatFromInt(args.height_segs));
+            const y = v * args.height - args.half_height;
+            const radius = args.radius_bottom + (args.radius_top - args.radius_bottom) * v;
+
+            for (0..args.radial_segs + 1) |r| {
+                const u: f32 = @as(f32, @floatFromInt(r)) / @as(f32, @floatFromInt(args.radial_segs));
+                const theta = u * 2.0 * math.K_PI;
+                const cos_theta = @cos(theta);
+                const sin_theta = @sin(theta);
+
+                const slope = (args.radius_bottom - args.radius_top) / args.height;
+                var nx = cos_theta;
+                var ny = slope;
+                var nz = sin_theta;
+                const len = @sqrt(nx * nx + ny * ny + nz * nz);
+                nx /= len;
+                ny /= len;
+                nz /= len;
+
+                const v_idx = args.h * (args.radial_segs + 1) + @as(u32, @intCast(r));
+                args.vertices[v_idx] = .{
+                    .position = .{ radius * cos_theta, y, radius * sin_theta },
+                    .normal = .{ nx, ny, nz },
+                    .texcoord = .{ u, v },
+                    .tangent = .{ -sin_theta, 0.0, cos_theta, 1.0 },
+                    .color = .{ args.color[0], args.color[1], args.color[2], 1.0 },
+                };
+            }
+
+            _ = args.counter.decrement();
+        }
+    }.execute;
+
+    // Submit ring generation jobs
+    for (0..height_segs + 1) |h| {
+        const args = RingGenArgs{
+            .h = @intCast(h),
+            .height_segs = height_segs,
+            .radial_segs = radial_segs,
+            .height = config.height,
+            .radius_top = config.radius_top,
+            .radius_bottom = config.radius_bottom,
+            .half_height = half_height,
+            .color = config.color,
+            .vertices = vertices,
+            .counter = vertex_counter,
+        };
+        _ = try jobs_sys.submit(generateRing, .{args});
+    }
+
+    const vertex_handle = jobs.JobHandle{ .counter = vertex_counter, .generation = vertex_generation };
+    jobs_sys.wait(vertex_handle);
+    jobs_sys.counter_pool.release(vertex_counter);
+
+    // Generate side indices (serial - relatively small)
+    var i_idx: usize = 0;
+    for (0..height_segs) |h| {
+        for (0..radial_segs) |r| {
+            const row_start = h * (radial_segs + 1);
+            const next_row_start = (h + 1) * (radial_segs + 1);
+
+            const tl: u32 = @intCast(row_start + r);
+            const tr: u32 = @intCast(row_start + r + 1);
+            const bl: u32 = @intCast(next_row_start + r);
+            const br: u32 = @intCast(next_row_start + r + 1);
+
+            indices[i_idx] = tl;
+            indices[i_idx + 1] = bl;
+            indices[i_idx + 2] = tr;
+            indices[i_idx + 3] = tr;
+            indices[i_idx + 4] = bl;
+            indices[i_idx + 5] = br;
+            i_idx += 6;
+        }
+    }
+
+    // Generate caps if not open ended
+    if (!config.open_ended) {
+        var v_idx = (height_segs + 1) * (radial_segs + 1);
+
+        // Top cap
+        const top_center_idx: u32 = @intCast(v_idx);
+        vertices[v_idx] = .{
+            .position = .{ 0.0, half_height, 0.0 },
+            .normal = .{ 0.0, 1.0, 0.0 },
+            .texcoord = .{ 0.5, 0.5 },
+            .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+            .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
+        };
+        v_idx += 1;
+
+        for (0..radial_segs + 1) |r| {
+            const u: f32 = @as(f32, @floatFromInt(r)) / @as(f32, @floatFromInt(radial_segs));
+            const theta = u * 2.0 * math.K_PI;
+            vertices[v_idx] = .{
+                .position = .{ config.radius_top * @cos(theta), half_height, config.radius_top * @sin(theta) },
+                .normal = .{ 0.0, 1.0, 0.0 },
+                .texcoord = .{ @cos(theta) * 0.5 + 0.5, @sin(theta) * 0.5 + 0.5 },
+                .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
+            };
+            v_idx += 1;
+        }
+
+        for (0..radial_segs) |r| {
+            indices[i_idx] = top_center_idx;
+            indices[i_idx + 1] = @intCast(top_center_idx + 2 + r);
+            indices[i_idx + 2] = @intCast(top_center_idx + 1 + r);
+            i_idx += 3;
+        }
+
+        // Bottom cap
+        const bottom_center_idx: u32 = @intCast(v_idx);
+        vertices[v_idx] = .{
+            .position = .{ 0.0, -half_height, 0.0 },
+            .normal = .{ 0.0, -1.0, 0.0 },
+            .texcoord = .{ 0.5, 0.5 },
+            .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+            .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
+        };
+        v_idx += 1;
+
+        for (0..radial_segs + 1) |r| {
+            const u: f32 = @as(f32, @floatFromInt(r)) / @as(f32, @floatFromInt(radial_segs));
+            const theta = u * 2.0 * math.K_PI;
+            vertices[v_idx] = .{
+                .position = .{ config.radius_bottom * @cos(theta), -half_height, config.radius_bottom * @sin(theta) },
+                .normal = .{ 0.0, -1.0, 0.0 },
+                .texcoord = .{ @cos(theta) * 0.5 + 0.5, @sin(theta) * 0.5 + 0.5 },
+                .tangent = .{ 1.0, 0.0, 0.0, 1.0 },
+                .color = .{ config.color[0], config.color[1], config.color[2], 1.0 },
+            };
+            v_idx += 1;
+        }
+
+        for (0..radial_segs) |r| {
+            indices[i_idx] = bottom_center_idx;
+            indices[i_idx + 1] = @intCast(bottom_center_idx + 1 + r);
+            indices[i_idx + 2] = @intCast(bottom_center_idx + 2 + r);
+            i_idx += 3;
+        }
+    }
+
+    // Create geometry config
+    var geo_config: GeometryConfig = .{
+        .vertex_count = @intCast(vertices.len),
+        .vertices = vertices.ptr,
+        .index_count = @intCast(i_idx),
+        .index_type = .u32,
+        .indices = indices.ptr,
+        .auto_release = config.auto_release,
+    };
+
+    const name_len = @min(config.name.len, GEOMETRY_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.name[0..name_len], config.name[0..name_len]);
+
+    const mat_len = @min(config.material_name.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
+    @memcpy(geo_config.material_name[0..mat_len], config.material_name[0..mat_len]);
+
+    return sys.acquireFromConfig(geo_config);
+}
+
+// ========== Internal/Legacy API ==========
 
 pub fn release(id: u32) void {
     if (getSystem()) |sys| {
@@ -1531,53 +2074,4 @@ pub fn getDefault() ?*Geometry {
 pub fn getDefaultId() u32 {
     const sys = getSystem() orelse return INVALID_GEOMETRY_ID;
     return sys.getDefaultId();
-}
-
-pub fn generatePlane(config: PlaneConfig) ?*Geometry {
-    const sys = getSystem() orelse {
-        logger.err("CRITICAL: GeometrySystem not available in context when generating plane", .{});
-        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
-        return null;
-    };
-    const result = sys.generatePlane(config);
-    if (result) |geo| {
-        logger.debug("[GEOMETRY] generatePlane returned geometry with ID: {}", .{geo.id});
-    }
-    return result;
-}
-
-pub fn generateCube(config: CubeConfig) ?*Geometry {
-    const sys = getSystem() orelse {
-        logger.err("CRITICAL: GeometrySystem not available in context when generating cube", .{});
-        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
-        return null;
-    };
-    const result = sys.generateCube(config);
-    if (result) |geo| {
-        logger.debug("[GEOMETRY] generateCube returned geometry with ID: {}", .{geo.id});
-    }
-    return result;
-}
-
-pub fn generateSphere(config: SphereConfig) ?*Geometry {
-    const sys = getSystem() orelse {
-        logger.err("CRITICAL: GeometrySystem not available in context when generating sphere", .{});
-        logger.err("  Context ptr: {*}, geometry field: {*}", .{ context.get(), context.get().geometry });
-        return null;
-    };
-    const result = sys.generateSphere(config);
-    if (result) |geo| {
-        logger.debug("[GEOMETRY] generateSphere returned geometry with ID: {}", .{geo.id});
-    }
-    return result;
-}
-
-pub fn generateCylinder(config: CylinderConfig) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.generateCylinder(config);
-}
-
-pub fn generateCone(config: ConeConfig) ?*Geometry {
-    const sys = getSystem() orelse return null;
-    return sys.generateCone(config);
 }

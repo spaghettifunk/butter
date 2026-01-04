@@ -25,6 +25,9 @@ pub const resources = struct {
     pub const Texture = @import("resources/types.zig").Texture;
 };
 
+// Export resource handles
+pub const resource_handle = @import("resources/handle.zig");
+
 // Export context for debugging and shared state access
 pub const context = @import("context.zig");
 

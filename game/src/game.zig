@@ -22,6 +22,10 @@ pub const GameState = struct {
 
     // Flag to track if we've set up the scene
     scene_initialized: bool = false,
+
+    // Testing flags
+    test_async_loading: bool = false,
+    async_texture_loaded: bool = false,
 };
 
 fn init(game: *Game) bool {
@@ -54,71 +58,126 @@ fn update(game: *Game, dt: f64) bool {
     return true;
 }
 
+// Callback for async texture loading test
+fn onTextureLoaded(tex_handle: engine.resource_handle.TextureHandle) void {
+    engine.logger.info("✅ ASYNC TEXTURE LOADED: ID = {d}, generation = {d}", .{tex_handle.id, tex_handle.generation});
+}
+
+// Test Resource Manager functionality
+fn testResourceManager() void {
+    engine.logger.info("=== Testing Resource Manager ===", .{});
+
+    const ctx = @import("engine").context;
+    const resource_mgr = ctx.get().resource_manager orelse {
+        engine.logger.err("Resource Manager not available!", .{});
+        return;
+    };
+
+    // Test 1: Synchronous texture loading through ResourceManager
+    engine.logger.info("Test 1: Sync texture loading through ResourceManager...", .{});
+    const tex_handle = resource_mgr.loadTexture("../assets/textures/cobblestone.png") catch |err| {
+        engine.logger.warn("Failed to load texture through ResourceManager: {}", .{err});
+        return;
+    };
+    engine.logger.info("✅ Loaded texture through ResourceManager: ID={d}, generation={d}", .{ tex_handle.id, tex_handle.generation });
+
+    // Test 2: Async texture loading with callback
+    engine.logger.info("Test 2: Async texture loading with callback...", .{});
+    _ = resource_mgr.loadTextureAsync("../assets/textures/cobblestone.png", onTextureLoaded) catch |err| {
+        engine.logger.warn("Failed to start async texture load: {}", .{err});
+    };
+
+    // Test 3: Material loading (auto-loads textures)
+    engine.logger.info("Test 3: Material loading through ResourceManager...", .{});
+    const mat_handle = resource_mgr.loadMaterial("cobblestone") catch |err| {
+        engine.logger.warn("Failed to load material through ResourceManager: {}", .{err});
+        return;
+    };
+    engine.logger.info("✅ Loaded material through ResourceManager: ID={d}, generation={d}", .{ mat_handle.id, mat_handle.generation });
+
+    // Test 4: Check resource metadata
+    engine.logger.info("Test 4: Querying resource metadata...", .{});
+    if (resource_mgr.getMetadata("../assets/textures/cobblestone.png")) |meta| {
+        engine.logger.info("✅ Texture metadata: state={s}, ref_count={d}, system_id={d}", .{
+            meta.state.toString(),
+            meta.ref_count,
+            meta.system_id,
+        });
+    }
+
+    if (resource_mgr.getMetadata("cobblestone")) |meta| {
+        engine.logger.info("✅ Material metadata: state={s}, ref_count={d}, system_id={d}", .{
+            meta.state.toString(),
+            meta.ref_count,
+            meta.system_id,
+        });
+    }
+
+    engine.logger.info("=== Resource Manager Tests Complete ===", .{});
+}
+
 fn initializeTestScene(state: *GameState) void {
     engine.logger.info("Initializing test scene with geometries...", .{});
 
-    // Load a material for the test objects
-    if (material.acquire("cobblestone")) |mat| {
-        state.test_material_id = mat.id;
-        engine.logger.info("Loaded cobblestone material with ID: {d}", .{mat.id});
-    } else {
-        engine.logger.warn("Failed to load cobblestone material, using default", .{});
-        // Get default material ID
+    // Run Resource Manager tests
+    testResourceManager();
+
+    const ctx = @import("engine").context;
+    const resource_mgr = ctx.get().resource_manager orelse {
+        engine.logger.err("Resource Manager not available!", .{});
+        return;
+    };
+
+    // Load material using Resource Manager (NEW API)
+    const mat_handle = resource_mgr.loadMaterial("cobblestone") catch |err| {
+        engine.logger.warn("Failed to load cobblestone material through ResourceManager: {}", .{err});
+        // Fallback to default material
         if (material.getDefaultMaterial()) |default_mat| {
             state.test_material_id = default_mat.id;
         }
-    }
+        return;
+    };
+    state.test_material_id = mat_handle.id;
+    engine.logger.info("Loaded cobblestone material through ResourceManager with ID: {d}", .{mat_handle.id});
 
-    // Generate procedural geometries using standalone functions
-    if (geometry.generateCube(.{
+    // Generate procedural geometries using Resource Manager (NEW API)
+    const cube_handle = resource_mgr.loadGeometryCube(.{
         .name = "test_cube",
         .width = 1.0,
         .height = 1.0,
         .depth = 1.0,
         .color = .{ 0.8, 0.2, 0.2 }, // Red-ish
-    })) |cube| {
-        state.cube_geo = cube.id;
-        if (cube.id == 0) {
-            engine.logger.err("CRITICAL: Cube geometry has invalid ID 0!", .{});
-        } else {
-            engine.logger.info("Created cube geometry with ID: {d}", .{cube.id});
-        }
-    } else {
-        engine.logger.err("Failed to create cube geometry", .{});
-    }
+    }) catch |err| {
+        engine.logger.err("Failed to create cube geometry through ResourceManager: {}", .{err});
+        return;
+    };
+    state.cube_geo = cube_handle.id;
+    engine.logger.info("Created cube geometry through ResourceManager with ID: {d}", .{cube_handle.id});
 
-    if (geometry.generateSphere(.{
+    const sphere_handle = resource_mgr.loadGeometrySphere(.{
         .name = "test_sphere",
         .radius = 0.5,
         .rings = 16,
         .sectors = 32,
         .color = .{ 0.2, 0.8, 0.2 }, // Green-ish
-    })) |sphere| {
-        state.sphere_geo = sphere.id;
-        if (sphere.id == 0) {
-            engine.logger.err("CRITICAL: Sphere geometry has invalid ID 0!", .{});
-        } else {
-            engine.logger.info("Created sphere geometry with ID: {d}", .{sphere.id});
-        }
-    } else {
-        engine.logger.err("Failed to create sphere geometry", .{});
-    }
+    }) catch |err| {
+        engine.logger.err("Failed to create sphere geometry through ResourceManager: {}", .{err});
+        return;
+    };
+    state.sphere_geo = sphere_handle.id;
+    engine.logger.info("Created sphere geometry through ResourceManager with ID: {d}", .{sphere_handle.id});
 
-    if (geometry.generatePlane(.{
+    const plane_handle = resource_mgr.loadGeometryPlane(.{
         .name = "ground_plane",
         .width = 10.0,
         .height = 10.0,
         .color = .{ 0.5, 0.5, 0.5 }, // Gray
-    })) |plane| {
-        state.plane_geo = plane.id;
-        if (plane.id == 0) {
-            engine.logger.err("CRITICAL: Plane geometry has invalid ID 0!", .{});
-        } else {
-            engine.logger.info("Created plane geometry with ID: {d}", .{plane.id});
-        }
-    } else {
-        engine.logger.err("Failed to create plane geometry", .{});
-    }
+    }) catch |err| {
+        engine.logger.err("Failed to create plane geometry through ResourceManager: {}", .{err});
+        return;
+    };
+    state.plane_geo = plane_handle.id;
+    engine.logger.info("Created plane geometry through ResourceManager with ID: {d}", .{plane_handle.id});
 
     // Add objects to editor scene
     const scene = editor.EditorSystem.getEditorScene() orelse {
@@ -128,7 +187,7 @@ fn initializeTestScene(state: *GameState) void {
 
     // Add cube
     if (state.cube_geo != 0) {
-        const cube_id = scene.addObject("Cube", state.cube_geo, 0);
+        const cube_id = scene.addObjectById("Cube", state.cube_geo, 0);
         if (scene.getObject(cube_id)) |obj| {
             obj.transform.position = .{ -2.0, 0.5, 0.0 };
             scene.updateBounds(obj);
@@ -138,7 +197,7 @@ fn initializeTestScene(state: *GameState) void {
 
     // Add sphere
     if (state.sphere_geo != 0) {
-        const sphere_id = scene.addObject("Sphere", state.sphere_geo, 0);
+        const sphere_id = scene.addObjectById("Sphere", state.sphere_geo, 0);
         if (scene.getObject(sphere_id)) |obj| {
             obj.transform.position = .{ 2.0, 0.5, 0.0 };
             scene.updateBounds(obj);
@@ -148,7 +207,7 @@ fn initializeTestScene(state: *GameState) void {
 
     // Add ground plane (already horizontal on XZ plane, no rotation needed)
     if (state.plane_geo != 0) {
-        const plane_id = scene.addObject("Ground", state.plane_geo, 0);
+        const plane_id = scene.addObjectById("Ground", state.plane_geo, 0);
         if (scene.getObject(plane_id)) |obj| {
             obj.transform.position = .{ 0.0, 0.0, 0.0 };
             scene.updateBounds(obj);
@@ -232,7 +291,7 @@ fn render(game: *Game, dt: f64) bool {
         if (!obj.is_visible) continue;
 
         // Get geometry
-        const geo = geometry.getGeometry(obj.geometry_id) orelse continue;
+        const geo = geometry.getGeometry(obj.getGeometryId()) orelse continue;
 
         // Calculate model matrix from transform
         const model = obj.transform.toModelMatrix();

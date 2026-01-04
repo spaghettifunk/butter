@@ -7,6 +7,8 @@ const std = @import("std");
 const resource = @import("resource.zig");
 const pass = @import("pass.zig");
 const graph_mod = @import("graph.zig");
+const context = @import("../../context.zig");
+const jobs = @import("../../systems/jobs.zig");
 
 const ResourceHandle = resource.ResourceHandle;
 const RenderPass = pass.RenderPass;
@@ -210,6 +212,156 @@ pub const GraphCompiler = struct {
         self.cullUnusedPasses();
 
         self.graph.is_compiled = true;
+    }
+
+    /// Compile the render graph asynchronously using the job system
+    /// Returns a job handle that can be waited on
+    /// Each compilation stage runs as a separate job with dependencies
+    pub fn compileAsync(self: *GraphCompiler) !jobs.JobHandle {
+        const jobs_sys = context.get().jobs orelse {
+            // Fallback to synchronous compilation if job system unavailable
+            try self.compile();
+            return jobs.INVALID_JOB_HANDLE;
+        };
+
+        // Reset state (must be done synchronously before jobs start)
+        self.compiled_pass_count = 0;
+        for (&self.adjacency) |*row| {
+            for (row) |*cell| {
+                cell.* = false;
+            }
+        }
+        for (&self.in_degree) |*deg| {
+            deg.* = 0;
+        }
+
+        // Create a counter for all compilation stages
+        const counter = try jobs_sys.counter_pool.allocate();
+        counter.init(5); // 5 stages: build deps, validate, sort, barriers, cull
+        const generation = counter.generation.load(.acquire);
+
+        // Stage 1: Build dependency graph (parallel pass iteration possible, but sequential for now)
+        const BuildDepsArgs = struct {
+            compiler: *GraphCompiler,
+            counter_ptr: *jobs.JobCounter,
+        };
+
+        const buildDepsJob = struct {
+            fn execute(args: BuildDepsArgs) void {
+                args.compiler.buildDependencyGraph();
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        const build_handle = try jobs_sys.submit(buildDepsJob, .{BuildDepsArgs{
+            .compiler = self,
+            .counter_ptr = counter,
+        }});
+
+        // Stage 2: Validate (depends on build)
+        const ValidateArgs = struct {
+            compiler: *GraphCompiler,
+            counter_ptr: *jobs.JobCounter,
+            prev_handle: jobs.JobHandle,
+        };
+
+        const validateJob = struct {
+            fn execute(args: ValidateArgs) void {
+                // Wait for previous stage
+                const jobs_sys_local = context.get().jobs.?;
+                jobs_sys_local.wait(args.prev_handle);
+
+                args.compiler.validateNoCycles() catch {
+                    // TODO: Better error handling - for now just mark as failed
+                    _ = args.counter_ptr.decrement();
+                    return;
+                };
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        const validate_handle = try jobs_sys.submit(validateJob, .{ValidateArgs{
+            .compiler = self,
+            .counter_ptr = counter,
+            .prev_handle = build_handle,
+        }});
+
+        // Stage 3: Topological sort (depends on validate)
+        const SortArgs = struct {
+            compiler: *GraphCompiler,
+            counter_ptr: *jobs.JobCounter,
+            prev_handle: jobs.JobHandle,
+        };
+
+        const sortJob = struct {
+            fn execute(args: SortArgs) void {
+                const jobs_sys_local = context.get().jobs.?;
+                jobs_sys_local.wait(args.prev_handle);
+
+                args.compiler.topologicalSort() catch {
+                    _ = args.counter_ptr.decrement();
+                    return;
+                };
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        const sort_handle = try jobs_sys.submit(sortJob, .{SortArgs{
+            .compiler = self,
+            .counter_ptr = counter,
+            .prev_handle = validate_handle,
+        }});
+
+        // Stage 4: Compute lifetimes and generate barriers (depends on sort)
+        const BarrierArgs = struct {
+            compiler: *GraphCompiler,
+            counter_ptr: *jobs.JobCounter,
+            prev_handle: jobs.JobHandle,
+        };
+
+        const barrierJob = struct {
+            fn execute(args: BarrierArgs) void {
+                const jobs_sys_local = context.get().jobs.?;
+                jobs_sys_local.wait(args.prev_handle);
+
+                args.compiler.computeResourceLifetimes();
+                args.compiler.generateBarriers();
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        const barrier_handle = try jobs_sys.submit(barrierJob, .{BarrierArgs{
+            .compiler = self,
+            .counter_ptr = counter,
+            .prev_handle = sort_handle,
+        }});
+
+        // Stage 5: Cull unused passes (depends on barriers)
+        const CullArgs = struct {
+            compiler: *GraphCompiler,
+            counter_ptr: *jobs.JobCounter,
+            prev_handle: jobs.JobHandle,
+        };
+
+        const cullJob = struct {
+            fn execute(args: CullArgs) void {
+                const jobs_sys_local = context.get().jobs.?;
+                jobs_sys_local.wait(args.prev_handle);
+
+                args.compiler.cullUnusedPasses();
+                args.compiler.graph.is_compiled = true;
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        _ = try jobs_sys.submit(cullJob, .{CullArgs{
+            .compiler = self,
+            .counter_ptr = counter,
+            .prev_handle = barrier_handle,
+        }});
+
+        // Return handle that caller can wait on
+        return jobs.JobHandle{ .counter = counter, .generation = generation };
     }
 
     /// Build the dependency adjacency matrix

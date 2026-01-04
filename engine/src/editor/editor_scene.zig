@@ -5,6 +5,7 @@
 const std = @import("std");
 const math = @import("../math/math.zig");
 const geometry_system = @import("../systems/geometry.zig");
+const handle = @import("../resources/handle.zig");
 
 /// Invalid object ID constant
 pub const INVALID_OBJECT_ID: EditorObjectId = 0;
@@ -57,8 +58,8 @@ pub const Transform = struct {
 pub const EditorObject = struct {
     id: EditorObjectId = INVALID_OBJECT_ID,
     name: [OBJECT_NAME_MAX_LENGTH]u8 = [_]u8{0} ** OBJECT_NAME_MAX_LENGTH,
-    geometry_id: u32 = geometry_system.INVALID_GEOMETRY_ID,
-    material_id: u32 = 0,
+    geometry: handle.GeometryHandle = handle.GeometryHandle.invalid,
+    material: handle.MaterialHandle = handle.MaterialHandle.invalid,
     transform: Transform = .{},
     is_visible: bool = true,
 
@@ -69,6 +70,16 @@ pub const EditorObject = struct {
     /// Get the object name as a slice
     pub fn getName(self: *const EditorObject) []const u8 {
         return std.mem.sliceTo(&self.name, 0);
+    }
+
+    /// Get geometry ID for backwards compatibility with systems that use raw IDs
+    pub fn getGeometryId(self: *const EditorObject) u32 {
+        return self.geometry.id;
+    }
+
+    /// Get material ID for backwards compatibility with systems that use raw IDs
+    pub fn getMaterialId(self: *const EditorObject) u32 {
+        return self.material.id;
     }
 };
 
@@ -91,15 +102,15 @@ pub const EditorScene = struct {
         self.objects.deinit(self.allocator);
     }
 
-    /// Add a new object to the scene
-    pub fn addObject(self: *EditorScene, name: []const u8, geometry_id: u32, material_id: u32) EditorObjectId {
+    /// Add a new object to the scene using resource handles
+    pub fn addObject(self: *EditorScene, name: []const u8, geometry: handle.GeometryHandle, material: handle.MaterialHandle) EditorObjectId {
         const id = self.next_id;
         self.next_id += 1;
 
         var obj = EditorObject{
             .id = id,
-            .geometry_id = geometry_id,
-            .material_id = material_id,
+            .geometry = geometry,
+            .material = material,
         };
 
         // Copy name
@@ -115,6 +126,13 @@ pub const EditorScene = struct {
         };
 
         return id;
+    }
+
+    /// Add a new object to the scene using raw IDs (backwards compatibility)
+    pub fn addObjectById(self: *EditorScene, name: []const u8, geometry_id: u32, material_id: u32) EditorObjectId {
+        const geom_handle = handle.GeometryHandle{ .id = geometry_id, .generation = 0 };
+        const mat_handle = handle.MaterialHandle{ .id = material_id, .generation = 0 };
+        return self.addObject(name, geom_handle, mat_handle);
     }
 
     /// Remove an object from the scene
@@ -166,9 +184,11 @@ pub const EditorScene = struct {
         var local_min: [3]f32 = .{ -0.5, -0.5, -0.5 };
         var local_max: [3]f32 = .{ 0.5, 0.5, 0.5 };
 
-        if (geometry_system.getGeometry(obj.geometry_id)) |geo| {
-            local_min = geo.bounding_min;
-            local_max = geo.bounding_max;
+        if (obj.geometry.isValid()) {
+            if (geometry_system.getGeometry(obj.geometry.id)) |geo| {
+                local_min = geo.bounding_min;
+                local_max = geo.bounding_max;
+            }
         }
 
         // Transform bounds to world space (simple AABB transform)
