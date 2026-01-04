@@ -25,6 +25,7 @@ const keybinding_config = @import("keybindings/config.zig");
 // Panels
 const CommandPalette = @import("panels/command_palette.zig").CommandPalette;
 const ConsolePanel = @import("panels/console_panel.zig").ConsolePanel;
+const ResourceLoadingPanel = @import("panels/resource_loading_panel.zig").ResourceLoadingPanel;
 const DebugOverlay = @import("panels/debug_overlay.zig").DebugOverlay;
 const gizmo_mod = @import("panels/gizmo.zig");
 const Gizmo = gizmo_mod.Gizmo;
@@ -59,6 +60,7 @@ pub const EditorSystem = struct {
     // Panels and overlays
     var command_palette: CommandPalette = undefined;
     var console_panel: ConsolePanel = undefined;
+    var resource_loading_panel: ResourceLoadingPanel = undefined;
     var debug_overlay: DebugOverlay = undefined;
     var gizmo: Gizmo = undefined;
 
@@ -85,6 +87,7 @@ pub const EditorSystem = struct {
     var show_material_panel: bool = false;
     var show_gizmo_panel: bool = false;
     var show_light_panel: bool = false;
+    var show_resource_loading: bool = false;
 
     pub fn initialize() bool {
         if (!imgui.ImGuiSystem.isInitialized()) {
@@ -102,6 +105,7 @@ pub const EditorSystem = struct {
             .openCommandPalette = openCommandPalette,
             .closeCommandPalette = closeCommandPalette,
             .toggleConsole = toggleConsole,
+            .toggleResourceLoading = toggleResourceLoading,
             .toggleAssetManager = toggleAssetManager,
             .toggleMaterialPanel = toggleMaterialPanel,
             .toggleSceneHierarchy = toggleSceneHierarchy,
@@ -140,6 +144,7 @@ pub const EditorSystem = struct {
         // Initialize panels
         command_palette = CommandPalette.init(allocator);
         console_panel = ConsolePanel.init(allocator);
+        resource_loading_panel = ResourceLoadingPanel.init(allocator);
         debug_overlay = DebugOverlay{};
         gizmo = Gizmo{};
 
@@ -183,6 +188,7 @@ pub const EditorSystem = struct {
         _ = event.unregister(.key_pressed, null, onKeyPressed);
 
         console_panel.deinit();
+        resource_loading_panel.deinit();
         command_palette.deinit();
         panel_manager.deinit();
         keybinding_manager.deinit();
@@ -259,6 +265,9 @@ pub const EditorSystem = struct {
         // Update debug overlay metrics
         debug_overlay.update(delta_time);
 
+        // Update resource loading panel
+        resource_loading_panel.update(delta_time);
+
         // Handle mouse click for object picking
         handleMousePicking();
 
@@ -288,6 +297,10 @@ pub const EditorSystem = struct {
 
         if (show_console) {
             console_panel.render(&show_console);
+        }
+
+        if (show_resource_loading) {
+            resource_loading_panel.render(&show_resource_loading);
         }
 
         if (show_gizmo_panel) {
@@ -713,6 +726,7 @@ pub const EditorSystem = struct {
                 _ = imgui.menuItemSelected("Asset Browser", &show_asset_browser);
                 _ = imgui.menuItemSelected("Material Panel", &show_material_panel);
                 _ = imgui.menuItemSelected("Console", &show_console);
+                _ = imgui.menuItemSelected("Resource Loading", &show_resource_loading);
                 imgui.separator();
                 _ = imgui.menuItemSelected("Gizmo Panel", &show_gizmo_panel);
                 _ = imgui.menuItemSelected("Light Panel", &show_light_panel);
@@ -773,6 +787,10 @@ pub const EditorSystem = struct {
 
     fn toggleConsole() void {
         show_console = !show_console;
+    }
+
+    fn toggleResourceLoading() void {
+        show_resource_loading = !show_resource_loading;
     }
 
     fn toggleAssetManager() void {

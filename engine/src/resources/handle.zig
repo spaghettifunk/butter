@@ -59,16 +59,20 @@ pub const ResourceType = enum(u8) {
     texture,
     material,
     geometry,
+    shader,
     font,
     scene,
+    unknown,
 
     pub fn toString(self: ResourceType) []const u8 {
         return switch (self) {
             .texture => "texture",
             .material => "material",
             .geometry => "geometry",
+            .shader => "shader",
             .font => "font",
             .scene => "scene",
+            .unknown => "unknown",
         };
     }
 };

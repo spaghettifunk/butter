@@ -6,9 +6,14 @@
 
 const std = @import("std");
 const math_types = @import("../../math/types.zig");
+const context = @import("../../context.zig");
+const jobs = @import("../../systems/jobs.zig");
 
 /// Maximum draw calls per frame
 pub const MAX_DRAW_CALLS: usize = 8192;
+
+/// Threshold for switching to parallel sorting
+pub const PARALLEL_SORT_THRESHOLD: usize = 512;
 
 /// Draw call information
 pub const DrawCall = struct {
@@ -129,6 +134,23 @@ pub const DrawList = struct {
         }.lessThan);
     }
 
+    /// Sort draw calls using parallel radix sort (for large lists)
+    /// Automatically falls back to serial sort if job system is unavailable or list is small
+    pub fn sortBySortKeyParallel(self: *DrawList) !void {
+        // Use serial sort for small lists or if job system unavailable
+        if (self.calls.items.len < PARALLEL_SORT_THRESHOLD) {
+            self.sortBySortKey();
+            return;
+        }
+
+        const jobs_sys = context.get().jobs orelse {
+            self.sortBySortKey();
+            return;
+        };
+
+        try radixSortParallel(self.calls.items, jobs_sys);
+    }
+
     /// Get all draw calls
     pub fn getDrawCalls(self: *const DrawList) []const DrawCall {
         return self.calls.items;
@@ -177,6 +199,179 @@ fn computeSortKeyWithDistance(material_id: u32, distance_sq: f32) u64 {
     // We use the raw bits of the float, which preserves ordering for positive floats
     const distance_bits: u32 = @bitCast(distance_sq);
     return computeSortKey(material_id, distance_bits);
+}
+
+/// Parallel radix sort for DrawCall arrays
+/// Sorts by sort_key (u64) using 8-bit radix (8 passes)
+fn radixSortParallel(items: []DrawCall, jobs_sys: *jobs.JobScheduler) !void {
+    const allocator = std.heap.page_allocator;
+
+    // Allocate temporary buffer for sorting
+    const temp = try allocator.alloc(DrawCall, items.len);
+    defer allocator.free(temp);
+
+    // We'll do 8 passes (8 bits per pass for u64 = 64 bits / 8 = 8 passes)
+    const RADIX_BITS = 8;
+    const RADIX_SIZE = 1 << RADIX_BITS; // 256
+    const NUM_PASSES = 8; // 64 bits / 8 bits per pass
+
+    // Allocate histogram arrays for parallel counting
+    const num_workers = jobs_sys.worker_count;
+    const histograms = try allocator.alloc([RADIX_SIZE]u32, num_workers);
+    defer allocator.free(histograms);
+
+    var src = items;
+    var dst = temp;
+
+    // Process each 8-bit chunk
+    var pass: usize = 0;
+    while (pass < NUM_PASSES) : (pass += 1) {
+        const shift = @as(u6, @intCast(pass * RADIX_BITS));
+
+        // Clear histograms
+        for (histograms) |*hist| {
+            @memset(hist, 0);
+        }
+
+        // Phase 1: Parallel histogram computation
+        const batch_size = (src.len + num_workers - 1) / num_workers;
+        const counter = try jobs_sys.counter_pool.allocate();
+        counter.init(@intCast(num_workers));
+        const generation = counter.generation.load(.acquire);
+
+        const HistogramArgs = struct {
+            worker_id: usize,
+            items_slice: []const DrawCall,
+            shift_amount: u6,
+            histogram: *[RADIX_SIZE]u32,
+            counter_ptr: *jobs.JobCounter,
+        };
+
+        const computeHistogram = struct {
+            fn execute(args: HistogramArgs) void {
+                for (args.items_slice) |item| {
+                    const digit = @as(u8, @truncate(item.sort_key >> args.shift_amount));
+                    args.histogram[digit] += 1;
+                }
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        // Submit histogram jobs
+        var worker_id: usize = 0;
+        while (worker_id < num_workers) : (worker_id += 1) {
+            const start = worker_id * batch_size;
+            if (start >= src.len) break;
+            const end = @min(start + batch_size, src.len);
+
+            const args = HistogramArgs{
+                .worker_id = worker_id,
+                .items_slice = src[start..end],
+                .shift_amount = shift,
+                .histogram = &histograms[worker_id],
+                .counter_ptr = counter,
+            };
+            _ = try jobs_sys.submit(computeHistogram, .{args});
+        }
+
+        const handle = jobs.JobHandle{ .counter = counter, .generation = generation };
+        jobs_sys.wait(handle);
+        jobs_sys.counter_pool.release(counter);
+
+        // Phase 2: Combine histograms and compute prefix sums (serial - fast enough)
+        var global_histogram: [RADIX_SIZE]u32 = [_]u32{0} ** RADIX_SIZE;
+        for (histograms) |hist| {
+            for (0..RADIX_SIZE) |i| {
+                global_histogram[i] += hist[i];
+            }
+        }
+
+        // Convert to prefix sum (exclusive scan)
+        var sum: u32 = 0;
+        for (0..RADIX_SIZE) |i| {
+            const count = global_histogram[i];
+            global_histogram[i] = sum;
+            sum += count;
+        }
+
+        // Phase 3: Parallel scatter to destination
+        // Each worker needs its own local offsets
+        const local_offsets = try allocator.alloc([RADIX_SIZE]u32, num_workers);
+        defer allocator.free(local_offsets);
+
+        // Initialize local offsets from global histogram
+        for (local_offsets, 0..) |*offset, wid| {
+            @memcpy(offset, &global_histogram);
+
+            // Add the counts from previous workers for this bucket
+            if (wid > 0) {
+                for (0..RADIX_SIZE) |bucket| {
+                    var prev_count: u32 = 0;
+                    for (0..wid) |prev_wid| {
+                        prev_count += histograms[prev_wid][bucket];
+                    }
+                    offset[bucket] += prev_count;
+                }
+            }
+        }
+
+        const scatter_counter = try jobs_sys.counter_pool.allocate();
+        scatter_counter.init(@intCast(num_workers));
+        const scatter_generation = scatter_counter.generation.load(.acquire);
+
+        const ScatterArgs = struct {
+            worker_id: usize,
+            src_slice: []const DrawCall,
+            dst_buffer: []DrawCall,
+            shift_amount: u6,
+            offsets: *[RADIX_SIZE]u32,
+            counter_ptr: *jobs.JobCounter,
+        };
+
+        const scatterItems = struct {
+            fn execute(args: ScatterArgs) void {
+                for (args.src_slice) |item| {
+                    const digit = @as(u8, @truncate(item.sort_key >> args.shift_amount));
+                    const pos = args.offsets[digit];
+                    args.dst_buffer[pos] = item;
+                    args.offsets[digit] += 1;
+                }
+                _ = args.counter_ptr.decrement();
+            }
+        }.execute;
+
+        // Submit scatter jobs
+        worker_id = 0;
+        while (worker_id < num_workers) : (worker_id += 1) {
+            const start = worker_id * batch_size;
+            if (start >= src.len) break;
+            const end = @min(start + batch_size, src.len);
+
+            const args = ScatterArgs{
+                .worker_id = worker_id,
+                .src_slice = src[start..end],
+                .dst_buffer = dst,
+                .shift_amount = shift,
+                .offsets = &local_offsets[worker_id],
+                .counter_ptr = scatter_counter,
+            };
+            _ = try jobs_sys.submit(scatterItems, .{args});
+        }
+
+        const scatter_handle = jobs.JobHandle{ .counter = scatter_counter, .generation = scatter_generation };
+        jobs_sys.wait(scatter_handle);
+        jobs_sys.counter_pool.release(scatter_counter);
+
+        // Swap buffers for next pass
+        const tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+
+    // If odd number of passes, copy result back to original array
+    if (NUM_PASSES % 2 == 1) {
+        @memcpy(items, src);
+    }
 }
 
 /// Per-pass draw list that filters the main draw list

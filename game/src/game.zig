@@ -187,7 +187,7 @@ fn initializeTestScene(state: *GameState) void {
 
     // Add cube
     if (state.cube_geo != 0) {
-        const cube_id = scene.addObject("Cube", state.cube_geo, 0);
+        const cube_id = scene.addObjectById("Cube", state.cube_geo, 0);
         if (scene.getObject(cube_id)) |obj| {
             obj.transform.position = .{ -2.0, 0.5, 0.0 };
             scene.updateBounds(obj);
@@ -197,7 +197,7 @@ fn initializeTestScene(state: *GameState) void {
 
     // Add sphere
     if (state.sphere_geo != 0) {
-        const sphere_id = scene.addObject("Sphere", state.sphere_geo, 0);
+        const sphere_id = scene.addObjectById("Sphere", state.sphere_geo, 0);
         if (scene.getObject(sphere_id)) |obj| {
             obj.transform.position = .{ 2.0, 0.5, 0.0 };
             scene.updateBounds(obj);
@@ -207,7 +207,7 @@ fn initializeTestScene(state: *GameState) void {
 
     // Add ground plane (already horizontal on XZ plane, no rotation needed)
     if (state.plane_geo != 0) {
-        const plane_id = scene.addObject("Ground", state.plane_geo, 0);
+        const plane_id = scene.addObjectById("Ground", state.plane_geo, 0);
         if (scene.getObject(plane_id)) |obj| {
             obj.transform.position = .{ 0.0, 0.0, 0.0 };
             scene.updateBounds(obj);
@@ -291,7 +291,7 @@ fn render(game: *Game, dt: f64) bool {
         if (!obj.is_visible) continue;
 
         // Get geometry
-        const geo = geometry.getGeometry(obj.geometry_id) orelse continue;
+        const geo = geometry.getGeometry(obj.getGeometryId()) orelse continue;
 
         // Calculate model matrix from transform
         const model = obj.transform.toModelMatrix();

@@ -11,6 +11,7 @@ pub const EditorCallbacks = struct {
     openCommandPalette: ?*const fn () void = null,
     closeCommandPalette: ?*const fn () void = null,
     toggleConsole: ?*const fn () void = null,
+    toggleResourceLoading: ?*const fn () void = null,
     toggleAssetManager: ?*const fn () void = null,
     toggleMaterialPanel: ?*const fn () void = null,
     toggleSceneHierarchy: ?*const fn () void = null,
@@ -58,6 +59,14 @@ pub fn registerBuiltinCommands(registry: *CommandRegistry) !void {
         .description = "Show or hide the console panel",
         .category = "View",
         .callback = cmdToggleConsole,
+    });
+
+    try registry.register(.{
+        .id = "view.toggle_resource_loading",
+        .name = "Toggle Resource Loading",
+        .description = "Show or hide the resource loading panel",
+        .category = "View",
+        .callback = cmdToggleResourceLoading,
     });
 
     try registry.register(.{
@@ -172,6 +181,10 @@ fn cmdCloseCommandPalette(_: ?*anyopaque) void {
 
 fn cmdToggleConsole(_: ?*anyopaque) void {
     if (callbacks.toggleConsole) |cb| cb();
+}
+
+fn cmdToggleResourceLoading(_: ?*anyopaque) void {
+    if (callbacks.toggleResourceLoading) |cb| cb();
 }
 
 fn cmdToggleAssetManager(_: ?*anyopaque) void {
