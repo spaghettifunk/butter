@@ -14,6 +14,7 @@ const jobs = @import("../systems/jobs.zig");
 const texture = @import("../systems/texture.zig");
 const material = @import("../systems/material.zig");
 const geometry = @import("../systems/geometry.zig");
+const mesh_asset = @import("../systems/mesh_asset.zig");
 const memory = @import("../systems/memory.zig");
 const handle = @import("handle.zig");
 const registry = @import("registry.zig");
@@ -103,6 +104,7 @@ pub const ResourceManager = struct {
     }
 
     /// Load geometry synchronously
+    /// DEPRECATED: Use loadMeshAsset() with MeshBuilder instead
     pub fn loadGeometry(self: *ResourceManager, path: []const u8) !handle.GeometryHandle {
         // Register in registry
         const metadata_id = try self.resource_registry.register(path, .geometry);
@@ -126,8 +128,10 @@ pub const ResourceManager = struct {
     }
 
     // ========== Procedural Geometry Generation ==========
+    // DEPRECATED: These will be replaced with MeshBuilder-based generators
 
     /// Generate a cube geometry synchronously
+    /// DEPRECATED: Use MeshBuilder to create procedural meshes instead
     pub fn loadGeometryCube(self: *ResourceManager, config: geometry.CubeConfig) !handle.GeometryHandle {
         // Register in registry using the config name
         const metadata_id = try self.resource_registry.register(config.name, .geometry);
@@ -151,6 +155,7 @@ pub const ResourceManager = struct {
     }
 
     /// Generate a sphere geometry synchronously
+    /// DEPRECATED: Use MeshBuilder to create procedural meshes instead
     pub fn loadGeometrySphere(self: *ResourceManager, config: geometry.SphereConfig) !handle.GeometryHandle {
         // Register in registry using the config name
         const metadata_id = try self.resource_registry.register(config.name, .geometry);
@@ -174,6 +179,7 @@ pub const ResourceManager = struct {
     }
 
     /// Generate a plane geometry synchronously
+    /// DEPRECATED: Use MeshBuilder to create procedural meshes instead
     pub fn loadGeometryPlane(self: *ResourceManager, config: geometry.PlaneConfig) !handle.GeometryHandle {
         // Register in registry using the config name
         const metadata_id = try self.resource_registry.register(config.name, .geometry);
@@ -193,6 +199,33 @@ pub const ResourceManager = struct {
         return handle.GeometryHandle{
             .id = geom.id,
             .generation = geom.generation,
+        };
+    }
+
+    // ========== MeshAsset Loading ==========
+
+    /// Load mesh asset (cache lookup only)
+    /// Note: Use MeshBuilder with acquireFromBuilder for new meshes
+    pub fn loadMeshAsset(self: *ResourceManager, name: []const u8) !handle.MeshAssetHandle {
+        // Register in registry
+        const metadata_id = try self.resource_registry.register(name, .mesh_asset);
+
+        // Try to acquire from cache
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquire(name) orelse return error.MeshAssetNotFound;
+
+        // Link system ID to metadata
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
+
+        // Update state
+        if (self.resource_registry.get(metadata_id)) |meta| {
+            meta.state = .loaded;
+            meta.system_id = mesh.id;
+        }
+
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
         };
     }
 
@@ -318,6 +351,7 @@ pub const ResourceManager = struct {
     }
 
     /// Load geometry asynchronously
+    /// DEPRECATED: Use loadMeshAsset() with MeshBuilder instead
     pub fn loadGeometryAsync(
         self: *ResourceManager,
         path: []const u8,

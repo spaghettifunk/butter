@@ -8,6 +8,9 @@ const std = @import("std");
 const math_types = @import("../../math/types.zig");
 const context = @import("../../context.zig");
 const jobs = @import("../../systems/jobs.zig");
+const mesh_asset_types = @import("../../resources/mesh_asset_types.zig");
+
+const MeshAsset = mesh_asset_types.MeshAsset;
 
 /// Maximum draw calls per frame
 pub const MAX_DRAW_CALLS: usize = 8192;
@@ -18,7 +21,16 @@ pub const PARALLEL_SORT_THRESHOLD: usize = 512;
 /// Draw call information
 pub const DrawCall = struct {
     /// Pointer to geometry data (opaque, backend-specific)
+    /// DEPRECATED: Use mesh_asset instead for new code
     geometry: *const anyopaque,
+
+    /// Pointer to MeshAsset (new system)
+    /// If non-null, use this instead of geometry
+    mesh_asset: ?*const MeshAsset = null,
+
+    /// Submesh index within the MeshAsset (0-31)
+    /// Only valid when mesh_asset is non-null
+    submesh_index: u8 = 0,
 
     /// Material ID for this draw call
     material_id: u32,
@@ -31,6 +43,17 @@ pub const DrawCall = struct {
 
     /// Custom user data
     user_data: ?*anyopaque = null,
+
+    /// Check if this draw call uses the new MeshAsset system
+    pub fn isMeshAsset(self: *const DrawCall) bool {
+        return self.mesh_asset != null;
+    }
+
+    /// Get the submesh for this draw call (if using MeshAsset)
+    pub fn getSubmesh(self: *const DrawCall) ?*const mesh_asset_types.Submesh {
+        const mesh = self.mesh_asset orelse return null;
+        return mesh.getSubmesh(self.submesh_index);
+    }
 };
 
 /// Draw list for collecting and organizing draw calls
@@ -90,6 +113,50 @@ pub const DrawList = struct {
     ) void {
         self.calls.append(.{
             .geometry = geometry,
+            .material_id = material_id,
+            .model_matrix = model_matrix,
+            .sort_key = computeSortKeyWithDistance(material_id, distance_sq),
+        }) catch return;
+    }
+
+    /// Add a MeshAsset draw call (new system)
+    ///
+    /// This adds a draw call for a specific submesh of a MeshAsset.
+    /// For meshes with multiple submeshes, call this once per submesh.
+    pub fn addMeshAssetDrawCall(
+        self: *DrawList,
+        mesh_asset: *const MeshAsset,
+        submesh_index: u8,
+        material_id: u32,
+        model_matrix: math_types.Mat4,
+    ) void {
+        // Use dummy geometry pointer for backward compatibility
+        // The geometry field will be ignored when mesh_asset is non-null
+        const dummy: u32 = 0;
+        self.calls.append(.{
+            .geometry = @ptrCast(&dummy),
+            .mesh_asset = mesh_asset,
+            .submesh_index = submesh_index,
+            .material_id = material_id,
+            .model_matrix = model_matrix,
+            .sort_key = computeSortKey(material_id, 0),
+        }) catch return;
+    }
+
+    /// Add a MeshAsset draw call with distance for sorting
+    pub fn addMeshAssetDrawCallWithDistance(
+        self: *DrawList,
+        mesh_asset: *const MeshAsset,
+        submesh_index: u8,
+        material_id: u32,
+        model_matrix: math_types.Mat4,
+        distance_sq: f32,
+    ) void {
+        const dummy: u32 = 0;
+        self.calls.append(.{
+            .geometry = @ptrCast(&dummy),
+            .mesh_asset = mesh_asset,
+            .submesh_index = submesh_index,
             .material_id = material_id,
             .model_matrix = model_matrix,
             .sort_key = computeSortKeyWithDistance(material_id, distance_sq),

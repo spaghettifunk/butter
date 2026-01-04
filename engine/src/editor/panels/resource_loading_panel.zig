@@ -185,6 +185,7 @@ pub const ResourceLoadingPanel = struct {
                             const type_str = switch (info.resource_type) {
                                 .texture => "Texture",
                                 .material => "Material",
+                                .mesh_asset => "Mesh",
                                 .geometry => "Geometry",
                                 .shader => "Shader",
                                 .font => "Font",

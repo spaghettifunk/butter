@@ -655,3 +655,67 @@ fn getVec4FromValue(val: std.json.Value) [4]f32 {
     }
     return result;
 }
+
+// ============================================================================
+// MeshBuilder Integration
+// ============================================================================
+
+const mesh_builder_mod = @import("../systems/mesh_builder.zig");
+const MeshBuilder = mesh_builder_mod.MeshBuilder;
+
+/// Load a glTF file and populate a MeshBuilder with its data
+///
+/// Each primitive in the glTF file becomes a submesh in the builder.
+/// This allows multi-material meshes to be properly represented.
+///
+/// Example usage:
+/// ```zig
+/// var builder = MeshBuilder.init(allocator);
+/// defer builder.deinit();
+///
+/// try loadGltfToBuilder(allocator, "model.gltf", &builder);
+/// try builder.finalize();
+///
+/// const mesh = mesh_asset_system.acquireFromBuilder(&builder, "model");
+/// ```
+pub fn loadGltfToBuilder(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    builder: *MeshBuilder,
+) !void {
+    // Load the glTF file using existing loader
+    var result = loadGltf(allocator, path) orelse return error.GltfLoadFailed;
+    defer result.deinit();
+
+    // Process each mesh (typically only one per file, but can be multiple)
+    for (result.meshes) |gltf_mesh| {
+        // Process each primitive as a submesh
+        for (gltf_mesh.primitives, 0..) |prim, prim_idx| {
+            // Create submesh name (e.g., "mesh_0" or use material index)
+            var submesh_name_buf: [128]u8 = undefined;
+            const submesh_name = if (prim.material_index) |mat_idx|
+                std.fmt.bufPrint(&submesh_name_buf, "{s}_mat{}", .{ gltf_mesh.name, mat_idx }) catch "submesh"
+            else
+                std.fmt.bufPrint(&submesh_name_buf, "{s}_{}", .{ gltf_mesh.name, prim_idx }) catch "submesh";
+
+            // Begin submesh
+            try builder.beginSubmesh(submesh_name);
+
+            // Get the starting vertex offset for this submesh
+            const vertex_offset = @as(u32, @intCast(builder.vertices.items.len));
+
+            // Add all vertices from this primitive
+            for (prim.vertices) |vertex| {
+                _ = try builder.addVertex(vertex);
+            }
+
+            // Add all indices (adjusted by vertex offset)
+            for (prim.indices) |index| {
+                try builder.addIndex(vertex_offset + index);
+            }
+
+            // End submesh (computes bounds)
+            try builder.endSubmesh();
+        }
+    }
+}

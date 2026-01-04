@@ -44,6 +44,7 @@ pub fn ResourceHandle(comptime T: type) type {
 pub const Texture = opaque {};
 pub const Material = opaque {};
 pub const Geometry = opaque {};
+pub const MeshAsset = opaque {};
 pub const Font = opaque {};
 pub const Scene = opaque {};
 
@@ -51,6 +52,7 @@ pub const Scene = opaque {};
 pub const TextureHandle = ResourceHandle(Texture);
 pub const MaterialHandle = ResourceHandle(Material);
 pub const GeometryHandle = ResourceHandle(Geometry);
+pub const MeshAssetHandle = ResourceHandle(MeshAsset);
 pub const FontHandle = ResourceHandle(Font);
 pub const SceneHandle = ResourceHandle(Scene);
 
@@ -59,6 +61,7 @@ pub const ResourceType = enum(u8) {
     texture,
     material,
     geometry,
+    mesh_asset,
     shader,
     font,
     scene,
@@ -69,6 +72,7 @@ pub const ResourceType = enum(u8) {
             .texture => "texture",
             .material => "material",
             .geometry => "geometry",
+            .mesh_asset => "mesh_asset",
             .shader => "shader",
             .font => "font",
             .scene => "scene",
@@ -111,6 +115,14 @@ pub const AnyResourceHandle = struct {
         };
     }
 
+    pub fn fromMeshAsset(handle: MeshAssetHandle) AnyResourceHandle {
+        return .{
+            .id = handle.id,
+            .generation = handle.generation,
+            .resource_type = .mesh_asset,
+        };
+    }
+
     pub fn fromFont(handle: FontHandle) AnyResourceHandle {
         return .{
             .id = handle.id,
@@ -140,6 +152,11 @@ pub const AnyResourceHandle = struct {
     pub fn toGeometry(self: AnyResourceHandle) ?GeometryHandle {
         if (self.resource_type != .geometry) return null;
         return GeometryHandle{ .id = self.id, .generation = self.generation };
+    }
+
+    pub fn toMeshAsset(self: AnyResourceHandle) ?MeshAssetHandle {
+        if (self.resource_type != .mesh_asset) return null;
+        return MeshAssetHandle{ .id = self.id, .generation = self.generation };
     }
 
     pub fn toFont(self: AnyResourceHandle) ?FontHandle {
