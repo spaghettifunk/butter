@@ -454,7 +454,6 @@ pub fn run() bool {
     if (ctx.get().jobs) |job_scheduler| {
         job_scheduler.deinit();
         ctx.get().jobs = null;
-        logger.info("Job system shutdown", .{});
     }
 
     // Deallocate application state before shutting down memory system
