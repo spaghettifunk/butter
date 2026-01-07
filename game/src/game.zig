@@ -3,7 +3,6 @@ const Game = engine.Game;
 const input = engine.input;
 const renderer = engine.renderer;
 const material = engine.material;
-const geometry = engine.geometry;
 const math = engine.math;
 const editor = engine.editor;
 const std = @import("std");
@@ -12,13 +11,10 @@ pub const GameState = struct {
     deltaTime: f64 = 0,
     total_time: f64 = 0,
 
-    // Geometry IDs for test objects
-    cube_geo: u32 = 0,
-    sphere_geo: u32 = 0,
-    plane_geo: u32 = 0,
-
-    // Material ID
-    test_material_id: u32 = 0,
+    // Mesh asset IDs for test objects
+    cube_mesh: u32 = 0,
+    sphere_mesh: u32 = 0,
+    plane_mesh: u32 = 0,
 
     // Flag to track if we've set up the scene
     scene_initialized: bool = false,
@@ -48,19 +44,12 @@ fn update(game: *Game, dt: f64) bool {
         state.scene_initialized = true;
     }
 
-    // Bind material BEFORE beginFrame (required for Vulkan descriptor set updates)
-    // Vulkan cannot update descriptor sets during frame recording, so this must happen
-    // during the update phase, not the render phase.
-    if (state.scene_initialized) {
-        material.bind(state.test_material_id);
-    }
-
     return true;
 }
 
 // Callback for async texture loading test
 fn onTextureLoaded(tex_handle: engine.resource_handle.TextureHandle) void {
-    engine.logger.info("✅ ASYNC TEXTURE LOADED: ID = {d}, generation = {d}", .{tex_handle.id, tex_handle.generation});
+    engine.logger.info("✅ ASYNC TEXTURE LOADED: ID = {d}, generation = {d}", .{ tex_handle.id, tex_handle.generation });
 }
 
 // Test Resource Manager functionality
@@ -119,65 +108,63 @@ fn testResourceManager() void {
 fn initializeTestScene(state: *GameState) void {
     engine.logger.info("Initializing test scene with geometries...", .{});
 
-    // Run Resource Manager tests
-    testResourceManager();
-
     const ctx = @import("engine").context;
     const resource_mgr = ctx.get().resource_manager orelse {
         engine.logger.err("Resource Manager not available!", .{});
         return;
     };
 
-    // Load material using Resource Manager (NEW API)
-    const mat_handle = resource_mgr.loadMaterial("cobblestone") catch |err| {
+    // Load materials using Resource Manager (NEW API)
+    const cobblestone_handle = resource_mgr.loadMaterial("cobblestone") catch |err| {
         engine.logger.warn("Failed to load cobblestone material through ResourceManager: {}", .{err});
-        // Fallback to default material
-        if (material.getDefaultMaterial()) |default_mat| {
-            state.test_material_id = default_mat.id;
-        }
         return;
     };
-    state.test_material_id = mat_handle.id;
-    engine.logger.info("Loaded cobblestone material through ResourceManager with ID: {d}", .{mat_handle.id});
+    engine.logger.info("Loaded cobblestone material through ResourceManager with ID: {d}", .{cobblestone_handle.id});
 
-    // Generate procedural geometries using Resource Manager (NEW API)
-    const cube_handle = resource_mgr.loadGeometryCube(.{
+    const colorful_handle = resource_mgr.loadMaterial("colorful") catch |err| {
+        engine.logger.warn("Failed to load colorful material through ResourceManager: {}", .{err});
+        return;
+    };
+    engine.logger.info("Loaded colorful material through ResourceManager with ID: {d}", .{colorful_handle.id});
+
+    // Generate procedural meshes using Resource Manager
+    const cube_handle = resource_mgr.loadMeshCube(.{
         .name = "test_cube",
         .width = 1.0,
         .height = 1.0,
         .depth = 1.0,
-        .color = .{ 0.8, 0.2, 0.2 }, // Red-ish
+        .color = .{ 1.0, 1.0, 1.0 },
     }) catch |err| {
-        engine.logger.err("Failed to create cube geometry through ResourceManager: {}", .{err});
+        engine.logger.err("Failed to create cube mesh through ResourceManager: {}", .{err});
         return;
     };
-    state.cube_geo = cube_handle.id;
-    engine.logger.info("Created cube geometry through ResourceManager with ID: {d}", .{cube_handle.id});
+    state.cube_mesh = cube_handle.id;
+    engine.logger.info("Created cube mesh through ResourceManager with ID: {d}", .{cube_handle.id});
 
-    const sphere_handle = resource_mgr.loadGeometrySphere(.{
+    const sphere_handle = resource_mgr.loadMeshSphere(.{
         .name = "test_sphere",
         .radius = 0.5,
         .rings = 16,
         .sectors = 32,
-        .color = .{ 0.2, 0.8, 0.2 }, // Green-ish
+        .color = .{ 1.0, 1.0, 1.0 },
     }) catch |err| {
-        engine.logger.err("Failed to create sphere geometry through ResourceManager: {}", .{err});
+        engine.logger.err("Failed to create sphere mesh through ResourceManager: {}", .{err});
         return;
     };
-    state.sphere_geo = sphere_handle.id;
-    engine.logger.info("Created sphere geometry through ResourceManager with ID: {d}", .{sphere_handle.id});
+    state.sphere_mesh = sphere_handle.id;
+    engine.logger.info("Created sphere mesh through ResourceManager with ID: {d}", .{sphere_handle.id});
 
-    const plane_handle = resource_mgr.loadGeometryPlane(.{
+    const plane_handle = resource_mgr.loadMeshPlane(.{
         .name = "ground_plane",
         .width = 10.0,
         .height = 10.0,
-        .color = .{ 0.5, 0.5, 0.5 }, // Gray
+        .color = .{ 1.0, 1.0, 1.0 },
     }) catch |err| {
-        engine.logger.err("Failed to create plane geometry through ResourceManager: {}", .{err});
+        engine.logger.err("Failed to create plane mesh through ResourceManager: {}", .{err});
         return;
     };
-    state.plane_geo = plane_handle.id;
-    engine.logger.info("Created plane geometry through ResourceManager with ID: {d}", .{plane_handle.id});
+    state.plane_mesh = plane_handle.id;
+    engine.logger.info("Created plane mesh through ResourceManager with ID: {d}", .{plane_handle.id});
 
     // Add objects to editor scene
     const scene = editor.EditorSystem.getEditorScene() orelse {
@@ -185,9 +172,9 @@ fn initializeTestScene(state: *GameState) void {
         return;
     };
 
-    // Add cube
-    if (state.cube_geo != 0) {
-        const cube_id = scene.addObjectById("Cube", state.cube_geo, 0);
+    // Add cube with cobblestone material
+    if (state.cube_mesh != 0) {
+        const cube_id = scene.addObjectById("Cube", state.cube_mesh, cobblestone_handle.id);
         if (scene.getObject(cube_id)) |obj| {
             obj.transform.position = .{ -2.0, 0.5, 0.0 };
             scene.updateBounds(obj);
@@ -195,9 +182,9 @@ fn initializeTestScene(state: *GameState) void {
         engine.logger.info("Added Cube to scene with object ID: {d}", .{cube_id});
     }
 
-    // Add sphere
-    if (state.sphere_geo != 0) {
-        const sphere_id = scene.addObjectById("Sphere", state.sphere_geo, 0);
+    // Add sphere with cobblestone material
+    if (state.sphere_mesh != 0) {
+        const sphere_id = scene.addObjectById("Sphere", state.sphere_mesh, cobblestone_handle.id);
         if (scene.getObject(sphere_id)) |obj| {
             obj.transform.position = .{ 2.0, 0.5, 0.0 };
             scene.updateBounds(obj);
@@ -205,15 +192,51 @@ fn initializeTestScene(state: *GameState) void {
         engine.logger.info("Added Sphere to scene with object ID: {d}", .{sphere_id});
     }
 
-    // Add ground plane (already horizontal on XZ plane, no rotation needed)
-    if (state.plane_geo != 0) {
-        const plane_id = scene.addObjectById("Ground", state.plane_geo, 0);
+    // Add ground plane with colorful material
+    if (state.plane_mesh != 0) {
+        const plane_id = scene.addObjectById("Ground", state.plane_mesh, colorful_handle.id);
         if (scene.getObject(plane_id)) |obj| {
-            obj.transform.position = .{ 0.0, 0.0, 0.0 };
+            obj.transform.position = .{ 0.0, -0.5, 0.0 }; // Below other objects so camera can see it from above
             scene.updateBounds(obj);
         }
-        engine.logger.info("Added Ground to scene with object ID: {d}", .{plane_id});
+        engine.logger.info("Added Ground plane to scene with object ID: {d}", .{plane_id});
     }
+
+    // Create cone mesh with colorful material
+    const cone_handle = resource_mgr.loadMeshCone(.{
+        .name = "test_cone",
+        .radius = 0.5,
+        .height = 1.0,
+        .segments = 32,
+        .color = .{ 1.0, 1.0, 1.0 },
+    }) catch |err| {
+        engine.logger.err("Failed to create cone mesh through ResourceManager: {}", .{err});
+        return;
+    };
+    const cone_id = scene.addObjectById("Cone", cone_handle.id, colorful_handle.id);
+    if (scene.getObject(cone_id)) |obj| {
+        obj.transform.position = .{ -4.0, 0.5, -2.0 };
+        scene.updateBounds(obj);
+    }
+    engine.logger.info("Added Cone to scene with object ID: {d}", .{cone_id});
+
+    // Create cylinder mesh with colorful material
+    const cylinder_handle = resource_mgr.loadMeshCylinder(.{
+        .name = "test_cylinder",
+        .radius = 0.4,
+        .height = 1.2,
+        .segments = 32,
+        .color = .{ 1.0, 1.0, 1.0 },
+    }) catch |err| {
+        engine.logger.err("Failed to create cylinder mesh through ResourceManager: {}", .{err});
+        return;
+    };
+    const cylinder_id = scene.addObjectById("Cylinder", cylinder_handle.id, colorful_handle.id);
+    if (scene.getObject(cylinder_id)) |obj| {
+        obj.transform.position = .{ 4.0, 0.6, -2.0 };
+        scene.updateBounds(obj);
+    }
+    engine.logger.info("Added Cylinder to scene with object ID: {d}", .{cylinder_id});
 
     engine.logger.info("Test scene initialized with {d} objects", .{scene.getObjectCount()});
 
@@ -224,7 +247,7 @@ fn initializeTestScene(state: *GameState) void {
             _ = light_sys.createLight(.{
                 .type = .point,
                 .position = .{ -3.0, 2.0, 2.0 },
-                .color = .{ 1.0, 0.0, 0.0 }, // Red
+                .color = .{ 1.0, 1.0, 1.0 }, // Red
                 .intensity = 1.5,
                 .range = 8.0,
             }) catch |err| {
@@ -278,26 +301,30 @@ fn render(game: *Game, dt: f64) bool {
     // Get renderer system
     const render_sys = renderer.getSystem() orelse return true;
 
-    // Bind material for rendering.
-    // Note: Material is ALSO bound in update() before beginFrame for Vulkan descriptor sets.
-    // Metal requires binding during render (when encoder is active), Vulkan needs it before frame.
-    // Both backends handle redundant calls gracefully.
-    material.bind(state.test_material_id);
-
     // Get editor scene and render all objects
     const scene = editor.EditorSystem.getEditorScene() orelse return true;
+
+    // Get mesh asset system
+    const ctx = @import("engine").context;
+    const mesh_sys = ctx.get().mesh_asset orelse return true;
 
     for (scene.getAllObjects()) |*obj| {
         if (!obj.is_visible) continue;
 
-        // Get geometry
-        const geo = geometry.getGeometry(obj.getGeometryId()) orelse continue;
+        // Get mesh asset
+        const mesh = mesh_sys.getMesh(obj.getMeshAssetId()) orelse continue;
+
+        // Get material for this object (per-object materials now supported!)
+        const obj_material = if (obj.getMaterialId() != 0)
+            material.getMaterial(obj.getMaterialId())
+        else
+            null;
 
         // Calculate model matrix from transform
         const model = obj.transform.toModelMatrix();
 
-        // Draw the geometry
-        render_sys.drawGeometry(geo, &model);
+        // Draw the mesh asset with its material
+        render_sys.drawMeshAsset(mesh, &model, obj_material);
     }
 
     return true;

@@ -471,3 +471,105 @@ fn computeTangents(vertices: []math_types.Vertex3D, indices: []const u32) void {
         v.tangent = .{ t[0], t[1], t[2], handedness };
     }
 }
+
+// ============================================================================
+// MeshBuilder Integration
+// ============================================================================
+
+const mesh_builder_mod = @import("../systems/mesh_builder.zig");
+const MeshBuilder = mesh_builder_mod.MeshBuilder;
+
+/// Load an OBJ file and populate a MeshBuilder with its data
+///
+/// Each material group (usemtl) in the OBJ file becomes a submesh.
+/// This preserves multi-material support while using the MeshAsset system.
+///
+/// Example usage:
+/// ```zig
+/// var builder = MeshBuilder.init(allocator);
+/// defer builder.deinit();
+///
+/// try loadObjToBuilder(allocator, "model.obj", &builder);
+/// try builder.computeTangents();  // OBJ files often don't have tangents
+/// try builder.finalize();
+///
+/// const mesh = mesh_asset_system.acquireFromBuilder(&builder, "model");
+/// ```
+pub fn loadObjToBuilder(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    builder: *MeshBuilder,
+) !void {
+    // Load the OBJ file using existing loader
+    var result = loadObj(allocator, path) orelse return error.ObjLoadFailed;
+    defer result.deinit();
+
+    // If there are no submeshes, create a single default submesh
+    if (result.sub_meshes.len == 0) {
+        // Add all vertices
+        const vertex_offset = @as(u32, @intCast(builder.vertices.items.len));
+        for (result.vertices) |vertex| {
+            _ = try builder.addVertex(vertex);
+        }
+
+        // Create single submesh with all indices
+        try builder.beginSubmesh("default");
+        for (result.indices) |index| {
+            try builder.addIndex(vertex_offset + index);
+        }
+        try builder.endSubmesh();
+
+        return;
+    }
+
+    // Process each submesh (material group)
+    for (result.sub_meshes) |submesh| {
+        // Get submesh name (use material name)
+        const submesh_name = if (submesh.material_name.len > 0)
+            submesh.material_name
+        else
+            "unnamed";
+
+        // Begin submesh
+        try builder.beginSubmesh(submesh_name);
+
+        // Get vertex range for this submesh from its indices
+        // We need to find the min/max vertex indices used by this submesh
+        const index_start = submesh.index_start;
+        const index_end = submesh.index_start + submesh.index_count;
+
+        if (index_end > result.indices.len) {
+            logger.err("OBJ submesh index range out of bounds", .{});
+            return error.InvalidSubmeshRange;
+        }
+
+        // Find min/max vertex indices for this submesh
+        var min_vertex_idx: u32 = std.math.maxInt(u32);
+        var max_vertex_idx: u32 = 0;
+        for (result.indices[index_start..index_end]) |idx| {
+            min_vertex_idx = @min(min_vertex_idx, idx);
+            max_vertex_idx = @max(max_vertex_idx, idx);
+        }
+
+        // Add vertices used by this submesh
+        const vertex_offset = @as(u32, @intCast(builder.vertices.items.len));
+
+        if (max_vertex_idx >= result.vertices.len) {
+            logger.err("OBJ vertex index out of bounds", .{});
+            return error.InvalidVertexIndex;
+        }
+
+        for (result.vertices[min_vertex_idx .. max_vertex_idx + 1]) |vertex| {
+            _ = try builder.addVertex(vertex);
+        }
+
+        // Add indices (adjusted for new vertex offset)
+        for (result.indices[index_start..index_end]) |index| {
+            const adjusted_index = (index - min_vertex_idx) + vertex_offset;
+            try builder.addIndex(adjusted_index);
+        }
+
+        // End submesh (computes bounds)
+        try builder.endSubmesh();
+    }
+}

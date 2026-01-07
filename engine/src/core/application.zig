@@ -7,7 +7,7 @@ const event = @import("../systems/event.zig");
 const input = @import("../systems/input.zig");
 const texture = @import("../systems/texture.zig");
 const material = @import("../systems/material.zig");
-const geometry = @import("../systems/geometry.zig");
+const mesh_asset = @import("../systems/mesh_asset.zig");
 const jobs = @import("../systems/jobs.zig");
 const resource_manager = @import("../resources/manager.zig");
 
@@ -221,9 +221,9 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
         return false;
     }
 
-    // Initialize geometry system (after renderer, texture, material)
-    if (!geometry.GeometrySystem.initialize()) {
-        logger.err("Failed to initialize geometry system.", .{});
+    // Initialize mesh asset system (after renderer, texture, material)
+    if (!mesh_asset.MeshAssetSystem.initialize()) {
+        logger.err("Failed to initialize mesh asset system.", .{});
         return false;
     }
 
@@ -439,7 +439,7 @@ pub fn run() bool {
         logger.info("Resource manager shutdown", .{});
     }
 
-    geometry.GeometrySystem.shutdown();
+    mesh_asset.MeshAssetSystem.shutdown();
 
     material.MaterialSystem.shutdown();
 

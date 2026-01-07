@@ -113,8 +113,9 @@ pub const VulkanContext = struct {
     // Material shader and pipeline
     material_shader: pipeline.MaterialShader = .{},
 
-    // Descriptor state
-    descriptor_state: descriptor.MaterialShaderDescriptorState = .{},
+    // Descriptor states (split into global and material for per-object material support)
+    global_descriptor_state: descriptor.GlobalDescriptorState = .{},
+    material_descriptor_state: descriptor.MaterialDescriptorState = .{},
 
     // Global uniform buffers (one per frame in flight)
     global_uniform_buffers: [swapchain.MAX_SWAPCHAIN_IMAGES]buffer.VulkanBuffer =
@@ -148,6 +149,9 @@ pub const VulkanContext = struct {
         .generation = 0,
         .internal_data = null,
     },
+
+    // Default material descriptor set (uses default texture for both diffuse and specular)
+    default_material_descriptor_set: vk.VkDescriptorSet = null,
 };
 
 /// Vulkan debug callback - called by validation layers

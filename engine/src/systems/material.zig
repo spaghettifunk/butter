@@ -345,6 +345,23 @@ pub const MaterialSystem = struct {
         entry.material.specular_color = config.specular_color;
         entry.material.shininess = config.shininess;
 
+        // Allocate material descriptor set (two-tier descriptor architecture)
+        if (renderer.getSystem()) |render_sys| {
+            entry.material.descriptor_set = switch (render_sys.backend) {
+                .vulkan => |*v| blk: {
+                    if (v.allocateMaterialDescriptorSet(tex_ptr.?, specular_tex_ptr.?)) |ds| {
+                        break :blk @ptrFromInt(@intFromPtr(ds));
+                    }
+                    break :blk null;
+                },
+                .metal => |*m| m.allocateMaterialDescriptorSet(tex_ptr.?, specular_tex_ptr.?),
+                else => null,
+            };
+            if (entry.material.descriptor_set == null) {
+                logger.warn("Failed to allocate descriptor set for material '{s}' - will use default", .{name_slice});
+            }
+        }
+
         // Copy name to material
         @memcpy(&entry.material.name, &config.name);
 

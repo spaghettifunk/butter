@@ -13,7 +13,8 @@ const logger = @import("../core/logging.zig");
 const jobs = @import("../systems/jobs.zig");
 const texture = @import("../systems/texture.zig");
 const material = @import("../systems/material.zig");
-const geometry = @import("../systems/geometry.zig");
+const mesh_asset = @import("../systems/mesh_asset.zig");
+const procedural = @import("../systems/procedural_meshes.zig");
 const memory = @import("../systems/memory.zig");
 const handle = @import("handle.zig");
 const registry = @import("registry.zig");
@@ -102,97 +103,172 @@ pub const ResourceManager = struct {
         };
     }
 
-    /// Load geometry synchronously
-    pub fn loadGeometry(self: *ResourceManager, path: []const u8) !handle.GeometryHandle {
+    // ========== Procedural Mesh Generation ==========
+
+    /// Generate a cube mesh synchronously
+    pub fn loadMeshCube(self: *ResourceManager, config: procedural.CubeConfig) !handle.MeshAssetHandle {
+        // Register in registry using the config name
+        const metadata_id = try self.resource_registry.register(config.name, .mesh_asset);
+
+        // Generate mesh using MeshBuilder
+        var builder = try procedural.generateCube(self.allocator, config);
+        defer builder.deinit();
+
+        // Create mesh asset from builder
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquireFromBuilder(&builder, config.name) orelse return error.MeshAssetCreationFailed;
+
+        // Link system ID to metadata
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
+
+        // Update state
+        if (self.resource_registry.get(metadata_id)) |meta| {
+            meta.state = .loaded;
+            meta.system_id = mesh.id;
+        }
+
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
+        };
+    }
+
+    /// Generate a sphere mesh synchronously
+    pub fn loadMeshSphere(self: *ResourceManager, config: procedural.SphereConfig) !handle.MeshAssetHandle {
+        // Register in registry using the config name
+        const metadata_id = try self.resource_registry.register(config.name, .mesh_asset);
+
+        // Generate mesh using MeshBuilder
+        var builder = try procedural.generateSphere(self.allocator, config);
+        defer builder.deinit();
+
+        // Create mesh asset from builder
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquireFromBuilder(&builder, config.name) orelse return error.MeshAssetCreationFailed;
+
+        // Link system ID to metadata
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
+
+        // Update state
+        if (self.resource_registry.get(metadata_id)) |meta| {
+            meta.state = .loaded;
+            meta.system_id = mesh.id;
+        }
+
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
+        };
+    }
+
+    /// Generate a plane mesh synchronously
+    pub fn loadMeshPlane(self: *ResourceManager, config: procedural.PlaneConfig) !handle.MeshAssetHandle {
+        // Register in registry using the config name
+        const metadata_id = try self.resource_registry.register(config.name, .mesh_asset);
+
+        // Generate mesh using MeshBuilder
+        var builder = try procedural.generatePlane(self.allocator, config);
+        defer builder.deinit();
+
+        // Create mesh asset from builder
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquireFromBuilder(&builder, config.name) orelse return error.MeshAssetCreationFailed;
+
+        // Link system ID to metadata
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
+
+        // Update state
+        if (self.resource_registry.get(metadata_id)) |meta| {
+            meta.state = .loaded;
+            meta.system_id = mesh.id;
+        }
+
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
+        };
+    }
+
+    /// Load a procedural cone mesh
+    pub fn loadMeshCone(self: *ResourceManager, config: procedural.ConeConfig) !handle.MeshAssetHandle {
+        // Register in registry using the config name
+        const metadata_id = try self.resource_registry.register(config.name, .mesh_asset);
+
+        // Generate mesh using MeshBuilder
+        var builder = try procedural.generateCone(self.allocator, config);
+        defer builder.deinit();
+
+        // Create mesh asset from builder
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquireFromBuilder(&builder, config.name) orelse return error.MeshAssetCreationFailed;
+
+        // Link system ID to metadata
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
+
+        // Update state
+        if (self.resource_registry.get(metadata_id)) |meta| {
+            meta.state = .loaded;
+            meta.system_id = mesh.id;
+        }
+
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
+        };
+    }
+
+    /// Load a procedural cylinder mesh
+    pub fn loadMeshCylinder(self: *ResourceManager, config: procedural.CylinderConfig) !handle.MeshAssetHandle {
+        // Register in registry using the config name
+        const metadata_id = try self.resource_registry.register(config.name, .mesh_asset);
+
+        // Generate mesh using MeshBuilder
+        var builder = try procedural.generateCylinder(self.allocator, config);
+        defer builder.deinit();
+
+        // Create mesh asset from builder
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquireFromBuilder(&builder, config.name) orelse return error.MeshAssetCreationFailed;
+
+        // Link system ID to metadata
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
+
+        // Update state
+        if (self.resource_registry.get(metadata_id)) |meta| {
+            meta.state = .loaded;
+            meta.system_id = mesh.id;
+        }
+
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
+        };
+    }
+
+    // ========== MeshAsset Loading ==========
+
+    /// Load mesh asset (cache lookup only)
+    /// Note: Use MeshBuilder with acquireFromBuilder for new meshes
+    pub fn loadMeshAsset(self: *ResourceManager, name: []const u8) !handle.MeshAssetHandle {
         // Register in registry
-        const metadata_id = try self.resource_registry.register(path, .geometry);
+        const metadata_id = try self.resource_registry.register(name, .mesh_asset);
 
-        // Load through geometry system
-        const geom = geometry.acquire(path) orelse return error.GeometryLoadFailed;
+        // Try to acquire from cache
+        const mesh_sys = mesh_asset.getSystem() orelse return error.MeshAssetSystemNotInitialized;
+        const mesh = mesh_sys.acquire(name) orelse return error.MeshAssetNotFound;
 
         // Link system ID to metadata
-        try self.resource_registry.linkSystemId(metadata_id, geom.id);
+        try self.resource_registry.linkSystemId(metadata_id, mesh.id);
 
         // Update state
         if (self.resource_registry.get(metadata_id)) |meta| {
             meta.state = .loaded;
-            meta.system_id = geom.id;
+            meta.system_id = mesh.id;
         }
 
-        return handle.GeometryHandle{
-            .id = geom.id,
-            .generation = geom.generation,
-        };
-    }
-
-    // ========== Procedural Geometry Generation ==========
-
-    /// Generate a cube geometry synchronously
-    pub fn loadGeometryCube(self: *ResourceManager, config: geometry.CubeConfig) !handle.GeometryHandle {
-        // Register in registry using the config name
-        const metadata_id = try self.resource_registry.register(config.name, .geometry);
-
-        // Generate through geometry system
-        const geom = geometry.generateCube(config) orelse return error.GeometryGenerationFailed;
-
-        // Link system ID to metadata
-        try self.resource_registry.linkSystemId(metadata_id, geom.id);
-
-        // Update state
-        if (self.resource_registry.get(metadata_id)) |meta| {
-            meta.state = .loaded;
-            meta.system_id = geom.id;
-        }
-
-        return handle.GeometryHandle{
-            .id = geom.id,
-            .generation = geom.generation,
-        };
-    }
-
-    /// Generate a sphere geometry synchronously
-    pub fn loadGeometrySphere(self: *ResourceManager, config: geometry.SphereConfig) !handle.GeometryHandle {
-        // Register in registry using the config name
-        const metadata_id = try self.resource_registry.register(config.name, .geometry);
-
-        // Generate through geometry system
-        const geom = geometry.generateSphere(config) orelse return error.GeometryGenerationFailed;
-
-        // Link system ID to metadata
-        try self.resource_registry.linkSystemId(metadata_id, geom.id);
-
-        // Update state
-        if (self.resource_registry.get(metadata_id)) |meta| {
-            meta.state = .loaded;
-            meta.system_id = geom.id;
-        }
-
-        return handle.GeometryHandle{
-            .id = geom.id,
-            .generation = geom.generation,
-        };
-    }
-
-    /// Generate a plane geometry synchronously
-    pub fn loadGeometryPlane(self: *ResourceManager, config: geometry.PlaneConfig) !handle.GeometryHandle {
-        // Register in registry using the config name
-        const metadata_id = try self.resource_registry.register(config.name, .geometry);
-
-        // Generate through geometry system
-        const geom = geometry.generatePlane(config) orelse return error.GeometryGenerationFailed;
-
-        // Link system ID to metadata
-        try self.resource_registry.linkSystemId(metadata_id, geom.id);
-
-        // Update state
-        if (self.resource_registry.get(metadata_id)) |meta| {
-            meta.state = .loaded;
-            meta.system_id = geom.id;
-        }
-
-        return handle.GeometryHandle{
-            .id = geom.id,
-            .generation = geom.generation,
+        return handle.MeshAssetHandle{
+            .id = mesh.id,
+            .generation = mesh.generation,
         };
     }
 
@@ -317,67 +393,6 @@ pub const ResourceManager = struct {
         return material.acquireAsync(name, Wrapper.onLoaded);
     }
 
-    /// Load geometry asynchronously
-    pub fn loadGeometryAsync(
-        self: *ResourceManager,
-        path: []const u8,
-        callback: ?*const fn (handle.GeometryHandle) void,
-    ) !jobs.JobHandle {
-        // Register in registry
-        const metadata_id = try self.resource_registry.register(path, .geometry);
-
-        // Mark as loading
-        if (self.resource_registry.get(metadata_id)) |meta| {
-            meta.state = .loading;
-        }
-
-        // Define callback args struct type
-        const CallbackArgs = struct {
-            metadata_id: u32,
-            user_callback: ?*const fn (handle.GeometryHandle) void,
-        };
-
-        // Create static wrapper
-        const Wrapper = struct {
-            var saved_args: CallbackArgs = undefined;
-
-            fn onLoaded(geom: ?*@import("../systems/geometry.zig").Geometry) void {
-                const sys = getSystem() orelse return;
-
-                // Update metadata
-                if (sys.resource_registry.get(saved_args.metadata_id)) |meta| {
-                    if (geom) |g| {
-                        meta.state = .loaded;
-                        meta.system_id = g.id;
-                        sys.resource_registry.linkSystemId(saved_args.metadata_id, g.id) catch {};
-                    } else {
-                        meta.state = .failed;
-                    }
-                }
-
-                // Call user callback
-                if (saved_args.user_callback) |cb| {
-                    if (geom) |g| {
-                        cb(handle.GeometryHandle{
-                            .id = g.id,
-                            .generation = g.generation,
-                        });
-                    } else {
-                        cb(handle.GeometryHandle.invalid);
-                    }
-                }
-            }
-        };
-
-        // Save args
-        Wrapper.saved_args = .{
-            .metadata_id = metadata_id,
-            .user_callback = callback,
-        };
-
-        return geometry.loadFromFileAsync(path, Wrapper.onLoaded);
-    }
-
     // ========== Batch Loading API ==========
 
     /// Batch load request
@@ -416,11 +431,12 @@ pub const ResourceManager = struct {
                         .material => {
                             _ = material.acquire(args.uri);
                         },
-                        .geometry => {
-                            _ = geometry.acquire(args.uri);
+                        .mesh_asset => {
+                            const mesh_sys = mesh_asset.getSystem() orelse return;
+                            _ = mesh_sys.acquire(args.uri);
                         },
                         else => {
-                            logger.warn("Unsupported resource type in batch load", .{});
+                            logger.warn("Unsupported resource type in batch load: {s}", .{args.resource_type.toString()});
                         },
                     }
                 }

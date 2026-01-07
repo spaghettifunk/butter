@@ -17,7 +17,7 @@ const input = @import("systems/input.zig");
 const logging = @import("core/logging.zig");
 const texture = @import("systems/texture.zig");
 const material = @import("systems/material.zig");
-const geometry = @import("systems/geometry.zig");
+const mesh_asset = @import("systems/mesh_asset.zig");
 const renderer = @import("renderer/renderer.zig");
 const jobs = @import("systems/jobs.zig");
 const resource_manager = @import("resources/manager.zig");
@@ -37,7 +37,7 @@ pub const EngineContext = extern struct {
     input: ?*input.InputSystem,
     texture: ?*texture.TextureSystem,
     material: ?*material.MaterialSystem,
-    geometry: ?*geometry.GeometrySystem,
+    mesh_asset: ?*mesh_asset.MeshAssetSystem,
     renderer: ?*renderer.RendererSystem,
 
     render_graph: ?*render_graph.RenderGraph,
@@ -60,7 +60,7 @@ var contextStorage: EngineContext = .{
     .input = null,
     .texture = null,
     .material = null,
-    .geometry = null,
+    .mesh_asset = null,
     .renderer = null,
 
     .render_graph = null,

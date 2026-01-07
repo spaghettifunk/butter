@@ -40,8 +40,15 @@ layout(set = 0, binding = 0) uniform GlobalUBO {
     vec4 ambient_color;
 } ubo;
 
-layout(set = 0, binding = 1) uniform sampler2D diffuse_sampler;
-layout(set = 0, binding = 2) uniform sampler2D specular_sampler;
+layout(set = 1, binding = 0) uniform sampler2D diffuse_sampler;
+layout(set = 1, binding = 1) uniform sampler2D specular_sampler;
+
+// Push constants (need to match vertex shader, but we only access material params)
+layout(push_constant) uniform PushConstants {
+    layout(offset = 64) vec4 tint_color;         // 16 bytes - material tint color
+    layout(offset = 80) vec4 material_params;    // 16 bytes - roughness, metallic, emission, pad
+    // Note: We skip model matrix (64 bytes) and UV transform (16 bytes) which are vertex-only
+} push;
 
 layout(location = 0) in vec4 frag_color;
 layout(location = 1) in vec2 frag_texcoord;
@@ -96,9 +103,20 @@ void main() {
     vec4 diffuse_tex = texture(diffuse_sampler, frag_texcoord);
     vec4 specular_tex = texture(specular_sampler, frag_texcoord);
 
+    // Apply material tint color from push constants
+    diffuse_tex.rgb *= push.tint_color.rgb;
+
+    // Extract material parameters
+    float roughness = push.material_params.x;
+    float metallic = push.material_params.y;
+    float emission = push.material_params.z;
+
     vec3 specular_color = specular_tex.rgb;
     float shininess = specular_tex.a * 128.0; // Map 0-1 to 0-128
     if (shininess < 1.0) shininess = 32.0; // Default if no specular map
+
+    // Apply roughness to shininess (rougher = less shiny)
+    shininess *= (1.0 - roughness);
 
     vec3 normal = normalize(frag_normal);
     vec3 view_dir = normalize(ubo.camera_position - frag_pos);
@@ -137,7 +155,8 @@ void main() {
         }
     }
 
-    // Final color
+    // Final color with emission
     vec3 result = (ambient + lighting) * diffuse_tex.rgb * frag_color.rgb;
-    out_color = vec4(result, diffuse_tex.a * frag_color.a);
+    result += diffuse_tex.rgb * emission; // Add emission
+    out_color = vec4(result, diffuse_tex.a * frag_color.a * push.tint_color.a);
 }

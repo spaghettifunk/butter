@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const math = @import("../math/math.zig");
-const geometry_system = @import("../systems/geometry.zig");
+const mesh_asset_system = @import("../systems/mesh_asset.zig");
 const handle = @import("../resources/handle.zig");
 
 /// Invalid object ID constant
@@ -58,7 +58,7 @@ pub const Transform = struct {
 pub const EditorObject = struct {
     id: EditorObjectId = INVALID_OBJECT_ID,
     name: [OBJECT_NAME_MAX_LENGTH]u8 = [_]u8{0} ** OBJECT_NAME_MAX_LENGTH,
-    geometry: handle.GeometryHandle = handle.GeometryHandle.invalid,
+    mesh_asset: handle.MeshAssetHandle = handle.MeshAssetHandle.invalid,
     material: handle.MaterialHandle = handle.MaterialHandle.invalid,
     transform: Transform = .{},
     is_visible: bool = true,
@@ -72,9 +72,14 @@ pub const EditorObject = struct {
         return std.mem.sliceTo(&self.name, 0);
     }
 
-    /// Get geometry ID for backwards compatibility with systems that use raw IDs
+    /// Get mesh asset ID for backwards compatibility with systems that use raw IDs
+    pub fn getMeshAssetId(self: *const EditorObject) u32 {
+        return self.mesh_asset.id;
+    }
+
+    /// Get geometry ID for backwards compatibility (returns mesh_asset id)
     pub fn getGeometryId(self: *const EditorObject) u32 {
-        return self.geometry.id;
+        return self.mesh_asset.id;
     }
 
     /// Get material ID for backwards compatibility with systems that use raw IDs
@@ -103,13 +108,13 @@ pub const EditorScene = struct {
     }
 
     /// Add a new object to the scene using resource handles
-    pub fn addObject(self: *EditorScene, name: []const u8, geometry: handle.GeometryHandle, material: handle.MaterialHandle) EditorObjectId {
+    pub fn addObject(self: *EditorScene, name: []const u8, mesh_asset: handle.MeshAssetHandle, material: handle.MaterialHandle) EditorObjectId {
         const id = self.next_id;
         self.next_id += 1;
 
         var obj = EditorObject{
             .id = id,
-            .geometry = geometry,
+            .mesh_asset = mesh_asset,
             .material = material,
         };
 
@@ -128,11 +133,31 @@ pub const EditorScene = struct {
         return id;
     }
 
-    /// Add a new object to the scene using raw IDs (backwards compatibility)
-    pub fn addObjectById(self: *EditorScene, name: []const u8, geometry_id: u32, material_id: u32) EditorObjectId {
-        const geom_handle = handle.GeometryHandle{ .id = geometry_id, .generation = 0 };
-        const mat_handle = handle.MaterialHandle{ .id = material_id, .generation = 0 };
-        return self.addObject(name, geom_handle, mat_handle);
+    /// Add a new object to the scene using raw IDs
+    /// Takes mesh_id and stores in mesh_asset field (new system)
+    pub fn addObjectById(self: *EditorScene, name: []const u8, mesh_id: u32, material_id: u32) EditorObjectId {
+        const id = self.next_id;
+        self.next_id += 1;
+
+        var obj = EditorObject{
+            .id = id,
+            .mesh_asset = .{ .id = mesh_id, .generation = 0 },
+            .material = .{ .id = material_id, .generation = 0 },
+        };
+
+        // Copy name
+        const copy_len = @min(name.len, OBJECT_NAME_MAX_LENGTH - 1);
+        @memcpy(obj.name[0..copy_len], name[0..copy_len]);
+        obj.name[copy_len] = 0;
+
+        // Update bounds from geometry
+        self.updateBoundsFromGeometry(&obj);
+
+        self.objects.append(self.allocator, obj) catch {
+            return INVALID_OBJECT_ID;
+        };
+
+        return id;
     }
 
     /// Remove an object from the scene
@@ -176,18 +201,19 @@ pub const EditorScene = struct {
         return self.objects.items.len;
     }
 
-    /// Update world bounds from geometry and transform
+    /// Update world bounds from mesh asset and transform
     pub fn updateBoundsFromGeometry(self: *EditorScene, obj: *EditorObject) void {
         _ = self;
 
-        // Get geometry bounding box
+        // Get bounding box from mesh_asset
         var local_min: [3]f32 = .{ -0.5, -0.5, -0.5 };
         var local_max: [3]f32 = .{ 0.5, 0.5, 0.5 };
 
-        if (obj.geometry.isValid()) {
-            if (geometry_system.getGeometry(obj.geometry.id)) |geo| {
-                local_min = geo.bounding_min;
-                local_max = geo.bounding_max;
+        if (obj.mesh_asset.isValid()) {
+            const mesh_sys = mesh_asset_system.getSystem() orelse return;
+            if (mesh_sys.getMesh(obj.mesh_asset.id)) |mesh| {
+                local_min = mesh.bounding_min;
+                local_max = mesh.bounding_max;
             }
         }
 

@@ -43,10 +43,17 @@ layout(set = 0, binding = 0) uniform GlobalUBO {
     vec4 ambient_color;
 } ubo;
 
-// Push constants for per-object data (model matrix)
+// Push constants for per-object data (model matrix + material parameters)
 // More efficient than UBO for frequently changing per-draw data
+// Total: 128 bytes
 layout(push_constant) uniform PushConstants {
-    mat4 model;
+    mat4 model;              // 64 bytes - model transformation matrix
+    vec4 tint_color;         // 16 bytes - material tint color
+    vec4 material_params;    // 16 bytes - roughness, metallic, emission, pad
+    vec2 uv_offset;          // 8 bytes - UV offset
+    vec2 uv_scale;           // 8 bytes - UV scale
+    uint flags;              // 4 bytes - material flags
+    // padding: 12 bytes
 } push;
 
 layout(location = 0) in vec3 in_position;
@@ -63,13 +70,15 @@ layout(location = 3) out vec3 frag_pos;
 void main() {
     vec4 world_pos = push.model * vec4(in_position, 1.0);
     gl_Position = ubo.projection * ubo.view * world_pos;
-    
+
     frag_pos = vec3(world_pos);
-    
+
     // Transform normal to world space (using mat3 of model matrix since we assume uniform scaling)
     // For non-uniform scaling, we should use inverse(transpose(mat3(model)))
     frag_normal = normalize(mat3(push.model) * in_normal);
-    
+
     frag_color = in_color;
-    frag_texcoord = in_texcoord;
+
+    // Apply UV transform (scale and offset) from push constants
+    frag_texcoord = in_texcoord * push.uv_scale + push.uv_offset;
 }

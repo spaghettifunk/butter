@@ -11,20 +11,35 @@ const vulkan_texture = @import("texture.zig");
 const resource_types = @import("../../resources/types.zig");
 const renderer = @import("../renderer.zig");
 
-/// Maximum descriptor sets that can be allocated
+/// Maximum descriptor sets that can be allocated for per-frame data
 pub const MAX_DESCRIPTOR_SETS: usize = swapchain.MAX_SWAPCHAIN_IMAGES;
 
-/// Descriptor state for material shader
-pub const MaterialShaderDescriptorState = struct {
-    /// Descriptor set layout for global UBO (MVP matrices)
+/// Maximum descriptor sets for materials (one per unique material)
+pub const MAX_MATERIAL_DESCRIPTORS: usize = 128;
+
+/// Global descriptor state (Set 0 - per-frame data: UBO only)
+pub const GlobalDescriptorState = struct {
+    /// Descriptor set layout for global UBO (camera, lights)
     global_layout: vk.VkDescriptorSetLayout = null,
 
-    /// Descriptor pool
+    /// Descriptor pool for per-frame sets
     pool: vk.VkDescriptorPool = null,
 
     /// Descriptor sets (one per frame in flight)
     global_sets: [MAX_DESCRIPTOR_SETS]vk.VkDescriptorSet =
         [_]vk.VkDescriptorSet{null} ** MAX_DESCRIPTOR_SETS,
+};
+
+/// Material descriptor state (Set 1 - per-material data: textures only)
+pub const MaterialDescriptorState = struct {
+    /// Descriptor set layout for material textures (diffuse, specular)
+    material_layout: vk.VkDescriptorSetLayout = null,
+
+    /// Descriptor pool for per-material sets
+    pool: vk.VkDescriptorPool = null,
+
+    /// Allocated material descriptor sets count
+    allocated_count: u32 = 0,
 };
 
 /// Descriptor state for grid shader
@@ -40,35 +55,19 @@ pub const GridShaderDescriptorState = struct {
         [_]vk.VkDescriptorSet{null} ** MAX_DESCRIPTOR_SETS,
 };
 
-/// Create the global descriptor set layout for UBO and texture sampler bindings
+/// Create the global descriptor set layout (Set 0: UBO only)
+/// This is the new two-tier architecture where textures are in Set 1
 pub fn createGlobalLayout(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
+    state: *GlobalDescriptorState,
 ) bool {
-    // Descriptor set bindings
-    var layout_bindings: [3]vk.VkDescriptorSetLayoutBinding = .{
-        // Global UBO binding: set 0, binding 0
+    // Set 0, Binding 0: Global UBO (camera, lights, etc.)
+    var layout_bindings: [1]vk.VkDescriptorSetLayoutBinding = .{
         .{
             .binding = 0,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
-            .pImmutableSamplers = null,
-        },
-        // Diffuse texture sampler binding: set 0, binding 1
-        .{
-            .binding = 1,
-            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
-            .pImmutableSamplers = null,
-        },
-        // Specular texture sampler binding: set 0, binding 2
-        .{
-            .binding = 2,
-            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = null,
         },
     };
@@ -89,18 +88,67 @@ pub fn createGlobalLayout(
     );
 
     if (result != vk.VK_SUCCESS) {
-        logger.err("vkCreateDescriptorSetLayout failed with result: {}", .{result});
+        logger.err("vkCreateDescriptorSetLayout (global) failed with result: {}", .{result});
         return false;
     }
 
-    logger.debug("Descriptor set layout created.", .{});
+    logger.debug("Global descriptor set layout created (Set 0: UBO only).", .{});
+    return true;
+}
+
+/// Create the material descriptor set layout (Set 1: Textures only)
+pub fn createMaterialLayout(
+    context: *vk_context.VulkanContext,
+    state: *MaterialDescriptorState,
+) bool {
+    // Set 1: Material textures
+    var layout_bindings: [2]vk.VkDescriptorSetLayoutBinding = .{
+        // Diffuse texture: set 1, binding 0
+        .{
+            .binding = 0,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Specular texture: set 1, binding 1
+        .{
+            .binding = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+    };
+
+    var layout_info: vk.VkDescriptorSetLayoutCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .bindingCount = layout_bindings.len,
+        .pBindings = &layout_bindings,
+    };
+
+    const result = vk.vkCreateDescriptorSetLayout(
+        context.device,
+        &layout_info,
+        context.allocator,
+        &state.material_layout,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateDescriptorSetLayout (material) failed with result: {}", .{result});
+        return false;
+    }
+
+    logger.debug("Material descriptor set layout created (Set 1: Textures only).", .{});
     return true;
 }
 
 /// Destroy the global descriptor set layout
 pub fn destroyGlobalLayout(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
+    state: *GlobalDescriptorState,
 ) void {
     if (context.device == null) return;
 
@@ -110,21 +158,31 @@ pub fn destroyGlobalLayout(
     }
 }
 
-/// Create the descriptor pool
-pub fn createPool(
+/// Destroy the material descriptor set layout
+pub fn destroyMaterialLayout(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
+    state: *MaterialDescriptorState,
+) void {
+    if (context.device == null) return;
+
+    if (state.material_layout) |layout| {
+        vk.vkDestroyDescriptorSetLayout(context.device, layout, context.allocator);
+        state.material_layout = null;
+    }
+}
+
+/// Create the global descriptor pool (for per-frame UBO sets)
+/// This is the new two-tier architecture where only UBOs are in the global pool
+pub fn createGlobalPool(
+    context: *vk_context.VulkanContext,
+    state: *GlobalDescriptorState,
     max_sets: u32,
 ) bool {
-    // Pool sizes for uniform buffers and combined image samplers
-    var pool_sizes: [2]vk.VkDescriptorPoolSize = .{
+    // Pool size for uniform buffers only
+    var pool_sizes: [1]vk.VkDescriptorPoolSize = .{
         .{
             .type = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = max_sets,
-        },
-        .{
-            .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = max_sets * 2, // diffuse + specular per set
         },
     };
 
@@ -145,18 +203,56 @@ pub fn createPool(
     );
 
     if (result != vk.VK_SUCCESS) {
-        logger.err("vkCreateDescriptorPool failed with result: {}", .{result});
+        logger.err("vkCreateDescriptorPool (global) failed with result: {}", .{result});
         return false;
     }
 
-    logger.debug("Descriptor pool created.", .{});
+    logger.debug("Global descriptor pool created.", .{});
     return true;
 }
 
-/// Destroy the descriptor pool (also frees all descriptor sets)
-pub fn destroyPool(
+/// Create the material descriptor pool (for per-material texture sets)
+pub fn createMaterialPool(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
+    state: *MaterialDescriptorState,
+) bool {
+    // Pool size for texture samplers only
+    var pool_sizes: [1]vk.VkDescriptorPoolSize = .{
+        .{
+            .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = MAX_MATERIAL_DESCRIPTORS * 2, // diffuse + specular per material
+        },
+    };
+
+    var pool_info: vk.VkDescriptorPoolCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .maxSets = MAX_MATERIAL_DESCRIPTORS,
+        .poolSizeCount = pool_sizes.len,
+        .pPoolSizes = &pool_sizes,
+    };
+
+    const result = vk.vkCreateDescriptorPool(
+        context.device,
+        &pool_info,
+        context.allocator,
+        &state.pool,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateDescriptorPool (material) failed with result: {}", .{result});
+        return false;
+    }
+
+    logger.debug("Material descriptor pool created (max {} materials).", .{MAX_MATERIAL_DESCRIPTORS});
+    return true;
+}
+
+/// Destroy the global descriptor pool (also frees all descriptor sets)
+pub fn destroyGlobalPool(
+    context: *vk_context.VulkanContext,
+    state: *GlobalDescriptorState,
 ) void {
     if (context.device == null) return;
 
@@ -171,14 +267,29 @@ pub fn destroyPool(
     }
 }
 
-/// Allocate descriptor sets from the pool
-pub fn allocateSets(
+/// Destroy the material descriptor pool (also frees all descriptor sets)
+pub fn destroyMaterialPool(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
+    state: *MaterialDescriptorState,
+) void {
+    if (context.device == null) return;
+
+    if (state.pool) |pool| {
+        vk.vkDestroyDescriptorPool(context.device, pool, context.allocator);
+        state.pool = null;
+    }
+
+    state.allocated_count = 0;
+}
+
+/// Allocate global descriptor sets from the pool
+pub fn allocateGlobalSets(
+    context: *vk_context.VulkanContext,
+    state: *GlobalDescriptorState,
     count: u32,
 ) bool {
     if (state.pool == null or state.global_layout == null) {
-        logger.err("Cannot allocate descriptor sets: pool or layout is null", .{});
+        logger.err("Cannot allocate global descriptor sets: pool or layout is null", .{});
         return false;
     }
 
@@ -208,18 +319,73 @@ pub fn allocateSets(
     );
 
     if (result != vk.VK_SUCCESS) {
-        logger.err("vkAllocateDescriptorSets failed with result: {}", .{result});
+        logger.err("vkAllocateDescriptorSets (global) failed with result: {}", .{result});
         return false;
     }
 
-    logger.debug("Allocated {} descriptor sets.", .{count});
+    logger.debug("Allocated {} global descriptor sets.", .{count});
     return true;
 }
 
-/// Update a descriptor set with buffer info (UBO only)
+/// Allocate a single material descriptor set
+pub fn allocateMaterialSet(
+    context: *vk_context.VulkanContext,
+    state: *MaterialDescriptorState,
+) ?vk.VkDescriptorSet {
+    if (state.pool == null or state.material_layout == null) {
+        logger.err("Cannot allocate material descriptor set: pool or layout is null", .{});
+        return null;
+    }
+
+    if (state.allocated_count >= MAX_MATERIAL_DESCRIPTORS) {
+        logger.warn("Material descriptor pool exhausted ({} / {} sets)", .{ state.allocated_count, MAX_MATERIAL_DESCRIPTORS });
+        return null;
+    }
+
+    var descriptor_set: vk.VkDescriptorSet = null;
+    var layouts: [1]vk.VkDescriptorSetLayout = .{state.material_layout};
+
+    var alloc_info: vk.VkDescriptorSetAllocateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = null,
+        .descriptorPool = state.pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &layouts,
+    };
+
+    const result = vk.vkAllocateDescriptorSets(
+        context.device,
+        &alloc_info,
+        &descriptor_set,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkAllocateDescriptorSets (material) failed with result: {}", .{result});
+        return null;
+    }
+
+    state.allocated_count += 1;
+    logger.debug("Allocated material descriptor set ({} / {}).", .{ state.allocated_count, MAX_MATERIAL_DESCRIPTORS });
+    return descriptor_set;
+}
+
+/// Free a material descriptor set (note: with current Vulkan, sets are freed when pool is reset/destroyed)
+pub fn freeMaterialSet(
+    _: *vk_context.VulkanContext,
+    state: *MaterialDescriptorState,
+) void {
+    // Note: Individual descriptor sets cannot be freed in Vulkan
+    // They are automatically freed when the pool is destroyed
+    // We just decrement the counter for tracking
+    if (state.allocated_count > 0) {
+        state.allocated_count -= 1;
+    }
+}
+
+/// Update a global descriptor set with buffer info (UBO only)
 pub fn updateGlobalSet(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
+    state: *GlobalDescriptorState,
     set_index: u32,
     buffer_info: *const vk.VkDescriptorBufferInfo,
 ) void {
@@ -244,138 +410,57 @@ pub fn updateGlobalSet(
     vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
 }
 
-/// Update a descriptor set with texture sampler info
-pub fn updateTextureSet(
+/// Update a material descriptor set with textures (diffuse and specular)
+pub fn updateMaterialSet(
     context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
-    set_index: u32,
-    texture: *const resource_types.Texture,
+    descriptor_set: vk.VkDescriptorSet,
+    diffuse_texture: *const resource_types.Texture,
+    specular_texture: *const resource_types.Texture,
 ) void {
-    if (set_index >= MAX_DESCRIPTOR_SETS) {
-        logger.err("Invalid descriptor set index: {}", .{set_index});
-        return;
-    }
-
-    if (texture.internal_data == null) {
+    if (diffuse_texture.internal_data == null or specular_texture.internal_data == null) {
         logger.err("Texture has no internal data", .{});
         return;
     }
 
-    const internal_data: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(texture.internal_data.?));
+    const diffuse_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(diffuse_texture.internal_data.?));
+    const specular_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(specular_texture.internal_data.?));
 
-    var image_info: vk.VkDescriptorImageInfo = .{
-        .sampler = internal_data.sampler,
-        .imageView = internal_data.image.view,
+    var diffuse_image_info: vk.VkDescriptorImageInfo = .{
+        .sampler = diffuse_internal.sampler,
+        .imageView = diffuse_internal.image.view,
         .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
 
-    var write: vk.VkWriteDescriptorSet = .{
-        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .pNext = null,
-        .dstSet = state.global_sets[set_index],
-        .dstBinding = 1,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &image_info,
-        .pBufferInfo = null,
-        .pTexelBufferView = null,
-    };
-
-    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
-}
-
-/// Update a descriptor set with a specular texture (binding 2)
-pub fn updateSpecularTextureSet(
-    context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
-    set_index: u32,
-    texture: *const resource_types.Texture,
-) void {
-    if (set_index >= MAX_DESCRIPTOR_SETS) {
-        logger.err("Invalid descriptor set index: {}", .{set_index});
-        return;
-    }
-
-    if (texture.internal_data == null) {
-        logger.err("Texture has no internal data", .{});
-        return;
-    }
-
-    const internal_data: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(texture.internal_data.?));
-
-    var image_info: vk.VkDescriptorImageInfo = .{
-        .sampler = internal_data.sampler,
-        .imageView = internal_data.image.view,
-        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-
-    var write: vk.VkWriteDescriptorSet = .{
-        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .pNext = null,
-        .dstSet = state.global_sets[set_index],
-        .dstBinding = 2, // Specular texture binding
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &image_info,
-        .pBufferInfo = null,
-        .pTexelBufferView = null,
-    };
-
-    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
-}
-
-/// Update a descriptor set with both buffer and texture info
-pub fn updateGlobalSetFull(
-    context: *vk_context.VulkanContext,
-    state: *MaterialShaderDescriptorState,
-    set_index: u32,
-    buffer_info: *const vk.VkDescriptorBufferInfo,
-    texture: *const resource_types.Texture,
-) void {
-    if (set_index >= MAX_DESCRIPTOR_SETS) {
-        logger.err("Invalid descriptor set index: {}", .{set_index});
-        return;
-    }
-
-    if (texture.internal_data == null) {
-        logger.err("Texture has no internal data", .{});
-        return;
-    }
-
-    const internal_data: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(texture.internal_data.?));
-
-    var image_info: vk.VkDescriptorImageInfo = .{
-        .sampler = internal_data.sampler,
-        .imageView = internal_data.image.view,
+    var specular_image_info: vk.VkDescriptorImageInfo = .{
+        .sampler = specular_internal.sampler,
+        .imageView = specular_internal.image.view,
         .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
 
     var writes: [2]vk.VkWriteDescriptorSet = .{
-        // UBO binding
+        // Diffuse texture at binding 0
         .{
             .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = null,
-            .dstSet = state.global_sets[set_index],
+            .dstSet = descriptor_set,
             .dstBinding = 0,
             .dstArrayElement = 0,
             .descriptorCount = 1,
-            .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pImageInfo = null,
-            .pBufferInfo = buffer_info,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &diffuse_image_info,
+            .pBufferInfo = null,
             .pTexelBufferView = null,
         },
-        // Texture sampler binding
+        // Specular texture at binding 1
         .{
             .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = null,
-            .dstSet = state.global_sets[set_index],
+            .dstSet = descriptor_set,
             .dstBinding = 1,
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &image_info,
+            .pImageInfo = &specular_image_info,
             .pBufferInfo = null,
             .pTexelBufferView = null,
         },

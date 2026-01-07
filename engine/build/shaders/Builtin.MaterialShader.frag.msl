@@ -5,6 +5,13 @@
 
 using namespace metal;
 
+struct PushConstants
+{
+    char _m0_pad[64];
+    float4 tint_color;
+    float4 material_params;
+};
+
 struct GlobalUBO
 {
     float4x4 projection;
@@ -71,17 +78,26 @@ float3 calculatePointLight(thread const float3& position, thread const float& ra
     return diffuse + specular;
 }
 
-fragment main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buffer(0)]], texture2d<float> diffuse_sampler [[texture(0)]], texture2d<float> specular_sampler [[texture(1)]], sampler diffuse_samplerSmplr [[sampler(0)]], sampler specular_samplerSmplr [[sampler(1)]])
+fragment main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[buffer(0)]], constant GlobalUBO& ubo [[buffer(1)]], texture2d<float> diffuse_sampler [[texture(0)]], texture2d<float> specular_sampler [[texture(1)]], sampler diffuse_samplerSmplr [[sampler(0)]], sampler specular_samplerSmplr [[sampler(1)]])
 {
     main0_out out = {};
     float4 diffuse_tex = diffuse_sampler.sample(diffuse_samplerSmplr, in.frag_texcoord);
     float4 specular_tex = specular_sampler.sample(specular_samplerSmplr, in.frag_texcoord);
+    float4 _160 = diffuse_tex;
+    float3 _162 = _160.xyz * push.tint_color.xyz;
+    diffuse_tex.x = _162.x;
+    diffuse_tex.y = _162.y;
+    diffuse_tex.z = _162.z;
+    float roughness = push.material_params.x;
+    float metallic = push.material_params.y;
+    float emission = push.material_params.z;
     float3 specular_color = specular_tex.xyz;
     float shininess = specular_tex.w * 128.0;
     if (shininess < 1.0)
     {
         shininess = 32.0;
     }
+    shininess *= (1.0 - roughness);
     float3 normal = fast::normalize(in.frag_normal);
     float3 view_dir = fast::normalize(float3(ubo.camera_position) - in.frag_pos);
     float3 ambient = ubo.ambient_color.xyz * ubo.ambient_color.w;
@@ -119,7 +135,8 @@ fragment main0_out main0(main0_in in [[stage_in]], constant GlobalUBO& ubo [[buf
         }
     }
     float3 result = ((ambient + lighting) * diffuse_tex.xyz) * in.frag_color.xyz;
-    out.out_color = float4(result, diffuse_tex.w * in.frag_color.w);
+    result += (diffuse_tex.xyz * emission);
+    out.out_color = float4(result, (diffuse_tex.w * in.frag_color.w) * push.tint_color.w);
     return out;
 }
 

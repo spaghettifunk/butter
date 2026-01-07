@@ -218,29 +218,45 @@ pub const VulkanBackend = struct {
             return false;
         }
 
-        // Create descriptor set layout
-        if (!descriptor.createGlobalLayout(&self.context, &self.context.descriptor_state)) {
-            logger.err("Failed to create descriptor set layout.", .{});
+        // TWO-TIER DESCRIPTOR ARCHITECTURE
+        // Set 0 (Global): UBO only - bound once per frame
+        // Set 1 (Material): Textures only - bound per draw call
+
+        // Create global descriptor layout (Set 0: UBO only)
+        if (!descriptor.createGlobalLayout(&self.context, &self.context.global_descriptor_state)) {
+            logger.err("Failed to create global descriptor set layout.", .{});
             return false;
         }
 
-        // Create descriptor pool
-        if (!descriptor.createPool(
+        // Create global descriptor pool
+        if (!descriptor.createGlobalPool(
             &self.context,
-            &self.context.descriptor_state,
+            &self.context.global_descriptor_state,
             self.context.swapchain.max_frames_in_flight,
         )) {
-            logger.err("Failed to create descriptor pool.", .{});
+            logger.err("Failed to create global descriptor pool.", .{});
             return false;
         }
 
-        // Allocate descriptor sets
-        if (!descriptor.allocateSets(
+        // Create material descriptor layout (Set 1: textures only)
+        if (!descriptor.createMaterialLayout(&self.context, &self.context.material_descriptor_state)) {
+            logger.err("Failed to create material descriptor layout.", .{});
+            return false;
+        }
+
+        // Create material descriptor pool (128 material descriptor sets)
+        if (!descriptor.createMaterialPool(&self.context, &self.context.material_descriptor_state)) {
+            logger.err("Failed to create material descriptor pool.", .{});
+            return false;
+        }
+
+        // Allocate global descriptor sets
+        if (!descriptor.allocateGlobalSets(
             &self.context,
-            &self.context.descriptor_state,
+            &self.context.global_descriptor_state,
             self.context.swapchain.max_frames_in_flight,
         )) {
-            logger.err("Failed to allocate descriptor sets.", .{});
+            logger.err("Failed to allocate global descriptor sets.", .{});
             return false;
         }
 
@@ -253,11 +269,12 @@ pub const VulkanBackend = struct {
             return false;
         }
 
-        // Create graphics pipeline
-        if (!pipeline.createMaterialPipeline(
+        // Create graphics pipeline with two-tier descriptor layout
+        if (!pipeline.createMaterialPipelineWithLayouts(
             &self.context,
             &self.context.material_shader,
-            self.context.descriptor_state.global_layout,
+            self.context.global_descriptor_state.global_layout,
+            self.context.material_descriptor_state.material_layout,
             self.context.main_renderpass.handle,
         )) {
             logger.err("Failed to create object shader pipeline.", .{});
@@ -272,14 +289,11 @@ pub const VulkanBackend = struct {
             }
         }
 
-        // Create default texture (white 1x1 texture)
+        // Create default texture (with material descriptor set for two-tier architecture)
         if (!self.createDefaultTexture()) {
             logger.err("Failed to create default texture.", .{});
             return false;
         }
-
-        // Update descriptor sets with default texture
-        self.updateDescriptorSetsWithTexture(&self.context.default_texture);
 
         logger.info("Vulkan renderer initialized successfully.", .{});
         return true;
@@ -306,11 +320,13 @@ pub const VulkanBackend = struct {
         shader.destroy(&self.context, &self.context.material_shader.vertex_shader);
         shader.destroy(&self.context, &self.context.material_shader.fragment_shader);
 
-        // Destroy descriptor pool (also frees descriptor sets)
-        descriptor.destroyPool(&self.context, &self.context.descriptor_state);
+        // Destroy descriptor pools (also frees descriptor sets)
+        descriptor.destroyGlobalPool(&self.context, &self.context.global_descriptor_state);
+        descriptor.destroyMaterialPool(&self.context, &self.context.material_descriptor_state);
 
-        // Destroy descriptor set layout
-        descriptor.destroyGlobalLayout(&self.context, &self.context.descriptor_state);
+        // Destroy descriptor set layouts
+        descriptor.destroyGlobalLayout(&self.context, &self.context.global_descriptor_state);
+        descriptor.destroyMaterialLayout(&self.context, &self.context.material_descriptor_state);
 
         // Destroy global uniform buffers
         self.destroyGlobalUniformBuffers();
@@ -600,7 +616,7 @@ pub const VulkanBackend = struct {
 
     /// Bind a texture for rendering. Pass null to use the default texture from TextureSystem.
     /// This uses per-frame texture tracking to avoid redundant descriptor set updates.
-    /// IMPORTANT: Texture binding during frame recording is deferred to avoid invalidating command buffers.
+    /// IMPORTANT: Texture binding can only happen before beginFrame or after endFrame, not during frame recording.
     pub fn bindTexture(self: *VulkanBackend, tex: ?*const resource_types.Texture) void {
         // If no texture provided, try to get default from TextureSystem, fall back to backend's default
         const texture_to_bind = tex orelse texture_system.getDefaultTexture() orelse &self.context.default_texture;
@@ -612,20 +628,15 @@ pub const VulkanBackend = struct {
         }
 
         // If we're in the middle of a frame, we CANNOT safely update descriptor sets
-        // because vkDeviceWaitIdle would invalidate the recording command buffer.
-        // The game should bind textures before beginFrame, not during render.
+        // Log a warning and skip the update
         if (self.context.frame_in_progress) {
-            // Skip the update - the currently bound texture will be used for this frame.
-            // This is a design limitation: texture changes during frame recording are ignored.
+            logger.warn("Attempted to bind texture during frame recording - ignoring. Bind textures before beginFrame.", .{});
             return;
         }
 
-        // Not in a frame, safe to update all descriptor sets
-        if (self.context.device != null) {
-            _ = vk.vkDeviceWaitIdle(self.context.device);
-        }
-        self.updateDescriptorSetsWithTexture(texture_to_bind);
-        // Mark all frames as having this texture bound
+        // TWO-TIER ARCHITECTURE: Textures are now bound per-material via descriptor sets
+        // This function is obsolete but kept for backward compatibility
+        // Just update the tracking to prevent repeated warnings
         for (&self.context.bound_texture_id) |*id| {
             id.* = texture_id;
         }
@@ -641,20 +652,53 @@ pub const VulkanBackend = struct {
             return;
         }
 
-        // Skip if frame is in progress (same logic as diffuse texture)
+        // If we're in the middle of a frame, we CANNOT safely update descriptor sets
+        // Log a warning and skip the update
         if (self.context.frame_in_progress) {
+            logger.warn("Attempted to bind specular texture during frame recording - ignoring. Bind textures before beginFrame.", .{});
             return;
         }
 
-        // Wait for device and update descriptor sets
-        if (self.context.device != null) {
-            _ = vk.vkDeviceWaitIdle(self.context.device);
-        }
-        self.updateDescriptorSetsWithSpecularTexture(texture_to_bind);
-        // Mark all frames as having this specular texture bound
+        // TWO-TIER ARCHITECTURE: Textures are now bound per-material via descriptor sets
+        // This function is obsolete but kept for backward compatibility
+        // Just update the tracking to prevent repeated warnings
         for (&self.context.bound_specular_texture_id) |*id| {
             id.* = texture_id;
         }
+    }
+
+    /// Allocate a material descriptor set and populate it with textures
+    /// Returns null on failure (pool exhaustion, invalid textures, etc.)
+    pub fn allocateMaterialDescriptorSet(
+        self: *VulkanBackend,
+        diffuse_texture: *const resource_types.Texture,
+        specular_texture: *const resource_types.Texture,
+    ) ?vk.VkDescriptorSet {
+        // Allocate a descriptor set from the material pool
+        const descriptor_set = descriptor.allocateMaterialSet(
+            &self.context,
+            &self.context.material_descriptor_state,
+        ) orelse {
+            logger.warn("Failed to allocate material descriptor set (pool may be exhausted)", .{});
+            return null;
+        };
+
+        // Update the descriptor set with the material's textures
+        descriptor.updateMaterialSet(
+            &self.context,
+            descriptor_set,
+            diffuse_texture,
+            specular_texture,
+        );
+
+        return descriptor_set;
+    }
+
+    /// Free a material descriptor set
+    /// Note: In Vulkan, individual descriptor sets cannot be freed - they're freed when the pool is destroyed
+    /// This just decrements the allocation counter for tracking purposes
+    pub fn freeMaterialDescriptorSet(self: *VulkanBackend, _: vk.VkDescriptorSet) void {
+        descriptor.freeMaterialSet(&self.context, &self.context.material_descriptor_state);
     }
 
     /// Draw geometry using its GPU buffers with a model matrix
@@ -674,16 +718,17 @@ pub const VulkanBackend = struct {
         // Bind the graphics pipeline
         pipeline.bindPipeline(cmd, &self.context.material_shader.pipeline);
 
-        // Bind the descriptor set for the current frame
+        // Bind both global (Set 0) and material (Set 1) descriptor sets
         const descriptor_sets = [_]vk.VkDescriptorSet{
-            self.context.descriptor_state.global_sets[current_frame],
+            self.context.global_descriptor_state.global_sets[current_frame], // Set 0: Global UBO
+            self.context.default_material_descriptor_set, // Set 1: Material textures (default)
         };
         vk.vkCmdBindDescriptorSets(
             cmd,
             vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
             self.context.material_shader.pipeline.layout,
             0,
-            1,
+            2, // Bind 2 descriptor sets
             &descriptor_sets,
             0,
             null,
@@ -734,6 +779,86 @@ pub const VulkanBackend = struct {
         if (geo.index_count > 0 and geo_gpu.index_buffer.handle != null) {
             const index_type = geo.index_type.toVulkan();
             vk.vkCmdBindIndexBuffer(cmd, geo_gpu.index_buffer.handle, 0, index_type);
+        }
+    }
+
+    /// Draw mesh asset with submesh support and per-object material
+    pub fn drawMeshAsset(self: *VulkanBackend, mesh: *const @import("../../resources/mesh_asset_types.zig").MeshAsset, model_matrix: *const math_types.Mat4, material: ?*const resource_types.Material) void {
+        const gpu_data = mesh.gpu_data orelse return;
+        const mesh_gpu = switch (gpu_data.*) {
+            .vulkan => |*v| v,
+            else => return,
+        };
+
+        // Get current command buffer
+        const image_index = self.context.image_index;
+        const cmd = self.context.graphics_command_buffers[image_index].handle;
+        const current_frame = self.context.current_frame;
+
+        // Bind the graphics pipeline
+        pipeline.bindPipeline(cmd, &self.context.material_shader.pipeline);
+
+        // Determine which material descriptor set to use
+        const material_descriptor_set = if (material) |mat|
+            if (mat.descriptor_set) |ds|
+                @as(vk.VkDescriptorSet, @ptrCast(ds))
+            else
+                self.context.default_material_descriptor_set
+        else
+            self.context.default_material_descriptor_set;
+
+        // Bind both global (Set 0) and material (Set 1) descriptor sets
+        const descriptor_sets = [_]vk.VkDescriptorSet{
+            self.context.global_descriptor_state.global_sets[current_frame], // Set 0: Global UBO
+            material_descriptor_set, // Set 1: Material textures
+        };
+        vk.vkCmdBindDescriptorSets(
+            cmd,
+            vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            self.context.material_shader.pipeline.layout,
+            0,
+            2, // Bind 2 descriptor sets
+            &descriptor_sets,
+            0,
+            null,
+        );
+
+        // Push the model matrix via push constants
+        const push_constant = pipeline.PushConstantObject{
+            .model = model_matrix.*,
+        };
+        pipeline.pushConstants(cmd, self.context.material_shader.pipeline.layout, &push_constant);
+
+        // Bind vertex buffer
+        const vertex_buffers = [_]vk.VkBuffer{mesh_gpu.vertex_buffer.handle};
+        const offsets = [_]vk.VkDeviceSize{0};
+        vk.vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffers, &offsets);
+
+        // Draw all submeshes
+        if (mesh.index_count > 0 and mesh_gpu.index_buffer.handle != null) {
+            // Bind index buffer
+            const index_type = mesh.index_type.toVulkan();
+            vk.vkCmdBindIndexBuffer(cmd, mesh_gpu.index_buffer.handle, 0, index_type);
+
+            if (mesh.submesh_count > 0) {
+                // Draw all submeshes
+                for (mesh.submeshes[0..mesh.submesh_count]) |*submesh| {
+                    vk.vkCmdDrawIndexed(cmd, submesh.index_count, 1, submesh.index_offset, 0, 0);
+                }
+            } else {
+                // Draw entire mesh
+                vk.vkCmdDrawIndexed(cmd, mesh.index_count, 1, 0, 0, 0);
+            }
+        } else {
+            // Draw non-indexed
+            if (mesh.submesh_count > 0) {
+                // Draw all submeshes
+                for (mesh.submeshes[0..mesh.submesh_count]) |*submesh| {
+                    vk.vkCmdDraw(cmd, submesh.vertex_count, 1, submesh.vertex_offset, 0);
+                }
+            } else {
+                vk.vkCmdDraw(cmd, mesh.vertex_count, 1, 0, 0);
+            }
         }
     }
 
@@ -984,31 +1109,9 @@ pub const VulkanBackend = struct {
 
             descriptor.updateGlobalSet(
                 &self.context,
-                &self.context.descriptor_state,
+                &self.context.global_descriptor_state,
                 @intCast(i),
                 &buffer_info,
-            );
-        }
-    }
-
-    fn updateDescriptorSetsWithTexture(self: *VulkanBackend, tex: *const resource_types.Texture) void {
-        for (0..self.context.swapchain.max_frames_in_flight) |i| {
-            descriptor.updateTextureSet(
-                &self.context,
-                &self.context.descriptor_state,
-                @intCast(i),
-                tex,
-            );
-        }
-    }
-
-    fn updateDescriptorSetsWithSpecularTexture(self: *VulkanBackend, tex: *const resource_types.Texture) void {
-        for (0..self.context.swapchain.max_frames_in_flight) |i| {
-            descriptor.updateSpecularTextureSet(
-                &self.context,
-                &self.context.descriptor_state,
-                @intCast(i),
-                tex,
             );
         }
     }
@@ -1054,7 +1157,27 @@ pub const VulkanBackend = struct {
             return false;
         }
 
-        logger.info("Default texture created ({}x{} checkerboard).", .{ texture_size, texture_size });
+        // Allocate material descriptor set for default texture (uses same texture for diffuse and specular)
+        const default_descriptor_set = descriptor.allocateMaterialSet(
+            &self.context,
+            &self.context.material_descriptor_state,
+        ) orelse {
+            logger.err("Failed to allocate descriptor set for default texture", .{});
+            return false;
+        };
+
+        // Update material descriptor set with both diffuse and specular pointing to the same default texture
+        descriptor.updateMaterialSet(
+            &self.context,
+            default_descriptor_set,
+            &self.context.default_texture,
+            &self.context.default_texture,
+        );
+
+        // Store descriptor set in context
+        self.context.default_material_descriptor_set = default_descriptor_set;
+
+        logger.info("Default texture created ({}x{} checkerboard) with descriptor set.", .{ texture_size, texture_size });
         return true;
     }
 
