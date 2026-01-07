@@ -48,95 +48,155 @@ struct main0_in
     float2 frag_texcoord [[user(locn1)]];
     float3 frag_normal [[user(locn2)]];
     float3 frag_pos [[user(locn3)]];
+    float3 frag_tangent [[user(locn4)]];
+    float3 frag_bitangent [[user(locn5)]];
 };
 
 static inline __attribute__((always_inline))
-float3 calculateDirectionalLight(thread const float3& direction, thread const float3& color, thread const float& intensity, thread const float3& normal, thread const float3& view_dir, thread const float3& specular_color, thread const float& shininess)
+float3 getNormalFromMap(thread const float2& uv, thread const float3& tangent, thread const float3& bitangent, thread const float3& normal, texture2d<float> normal_sampler, sampler normal_samplerSmplr)
 {
-    float3 light_dir = fast::normalize(-direction);
-    float diff = fast::max(dot(normal, light_dir), 0.0);
-    float3 diffuse = (color * diff) * intensity;
-    float3 halfway_dir = fast::normalize(light_dir + view_dir);
-    float spec = powr(fast::max(dot(normal, halfway_dir), 0.0), shininess);
-    float3 specular = (specular_color * spec) * intensity;
-    return diffuse + specular;
+    float3 tangent_normal = (normal_sampler.sample(normal_samplerSmplr, uv).xyz * 2.0) - float3(1.0);
+    float3x3 TBN = float3x3(float3(tangent), float3(bitangent), float3(normal));
+    return fast::normalize(TBN * tangent_normal);
 }
 
 static inline __attribute__((always_inline))
-float3 calculatePointLight(thread const float3& position, thread const float& range, thread const float3& color, thread const float& intensity, thread const float3& normal, thread const float3& frag_pos, thread const float3& view_dir, thread const float3& specular_color, thread const float& shininess)
+float DistributionGGX(thread const float3& N, thread const float3& H, thread const float& roughness)
 {
-    float3 light_dir = position - frag_pos;
-    float _distance = length(light_dir);
-    light_dir = fast::normalize(light_dir);
-    float attenuation = 1.0 / (1.0 + (_distance * _distance));
-    attenuation *= smoothstep(range, range * 0.5, _distance);
-    float diff = fast::max(dot(normal, light_dir), 0.0);
-    float3 diffuse = ((color * diff) * intensity) * attenuation;
-    float3 halfway_dir = fast::normalize(light_dir + view_dir);
-    float spec = powr(fast::max(dot(normal, halfway_dir), 0.0), shininess);
-    float3 specular = ((specular_color * spec) * intensity) * attenuation;
-    return diffuse + specular;
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = fast::max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    float num = a2;
+    float denom = (NdotH2 * (a2 - 1.0)) + 1.0;
+    denom = (3.1415927410125732421875 * denom) * denom;
+    return num / denom;
 }
 
-fragment main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[buffer(0)]], constant GlobalUBO& ubo [[buffer(1)]], texture2d<float> diffuse_sampler [[texture(0)]], texture2d<float> specular_sampler [[texture(1)]], sampler diffuse_samplerSmplr [[sampler(0)]], sampler specular_samplerSmplr [[sampler(1)]])
+static inline __attribute__((always_inline))
+float GeometrySchlickGGX(thread const float& NdotV, thread const float& roughness)
+{
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+    float num = NdotV;
+    float denom = (NdotV * (1.0 - k)) + k;
+    return num / denom;
+}
+
+static inline __attribute__((always_inline))
+float GeometrySmith(thread const float3& N, thread const float3& V, thread const float3& L, thread const float& roughness)
+{
+    float NdotV = fast::max(dot(N, V), 0.0);
+    float NdotL = fast::max(dot(N, L), 0.0);
+    float param = NdotV;
+    float param_1 = roughness;
+    float ggx2 = GeometrySchlickGGX(param, param_1);
+    float param_2 = NdotL;
+    float param_3 = roughness;
+    float ggx1 = GeometrySchlickGGX(param_2, param_3);
+    return ggx1 * ggx2;
+}
+
+static inline __attribute__((always_inline))
+float3 fresnelSchlick(thread const float& cosTheta, thread const float3& F0)
+{
+    return F0 + ((float3(1.0) - F0) * powr(fast::clamp(1.0 - cosTheta, 0.0, 1.0), 5.0));
+}
+
+static inline __attribute__((always_inline))
+float3 calculatePBR(thread const float3& N, thread const float3& V, thread const float3& L, thread const float3& H, thread const float3& albedo, thread const float& metallic, thread const float& roughness, thread const float3& F0, thread const float3& radiance)
+{
+    float3 param = N;
+    float3 param_1 = H;
+    float param_2 = roughness;
+    float NDF = DistributionGGX(param, param_1, param_2);
+    float3 param_3 = N;
+    float3 param_4 = V;
+    float3 param_5 = L;
+    float param_6 = roughness;
+    float G = GeometrySmith(param_3, param_4, param_5, param_6);
+    float param_7 = fast::max(dot(H, V), 0.0);
+    float3 param_8 = F0;
+    float3 F = fresnelSchlick(param_7, param_8);
+    float3 kS = F;
+    float3 kD = float3(1.0) - kS;
+    kD *= (1.0 - metallic);
+    float3 numerator = F * (NDF * G);
+    float denominator = ((4.0 * fast::max(dot(N, V), 0.0)) * fast::max(dot(N, L), 0.0)) + 9.9999997473787516355514526367188e-05;
+    float3 specular = numerator / float3(denominator);
+    float NdotL = fast::max(dot(N, L), 0.0);
+    return ((((kD * albedo) / float3(3.1415927410125732421875)) + specular) * radiance) * NdotL;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[buffer(0)]], constant GlobalUBO& ubo [[buffer(1)]], texture2d<float> normal_sampler [[texture(0)]], texture2d<float> albedo_sampler [[texture(1)]], texture2d<float> metallic_roughness_sampler [[texture(2)]], texture2d<float> ao_sampler [[texture(3)]], texture2d<float> emissive_sampler [[texture(4)]], sampler normal_samplerSmplr [[sampler(0)]], sampler albedo_samplerSmplr [[sampler(1)]], sampler metallic_roughness_samplerSmplr [[sampler(2)]], sampler ao_samplerSmplr [[sampler(3)]], sampler emissive_samplerSmplr [[sampler(4)]])
 {
     main0_out out = {};
-    float4 diffuse_tex = diffuse_sampler.sample(diffuse_samplerSmplr, in.frag_texcoord);
-    float4 specular_tex = specular_sampler.sample(specular_samplerSmplr, in.frag_texcoord);
-    float4 _160 = diffuse_tex;
-    float3 _162 = _160.xyz * push.tint_color.xyz;
-    diffuse_tex.x = _162.x;
-    diffuse_tex.y = _162.y;
-    diffuse_tex.z = _162.z;
-    float roughness = push.material_params.x;
-    float metallic = push.material_params.y;
-    float emission = push.material_params.z;
-    float3 specular_color = specular_tex.xyz;
-    float shininess = specular_tex.w * 128.0;
-    if (shininess < 1.0)
-    {
-        shininess = 32.0;
-    }
-    shininess *= (1.0 - roughness);
-    float3 normal = fast::normalize(in.frag_normal);
-    float3 view_dir = fast::normalize(float3(ubo.camera_position) - in.frag_pos);
-    float3 ambient = ubo.ambient_color.xyz * ubo.ambient_color.w;
-    float3 lighting = float3(0.0);
+    float3 albedo = albedo_sampler.sample(albedo_samplerSmplr, in.frag_texcoord).xyz;
+    albedo = powr(albedo, float3(2.2000000476837158203125));
+    albedo *= (push.tint_color.xyz * in.frag_color.xyz);
+    float2 metallic_roughness = metallic_roughness_sampler.sample(metallic_roughness_samplerSmplr, in.frag_texcoord).yz;
+    float roughness = fast::clamp(metallic_roughness.x * push.material_params.x, 0.039999999105930328369140625, 1.0);
+    float metallic = metallic_roughness.y * push.material_params.y;
+    float ao = ao_sampler.sample(ao_samplerSmplr, in.frag_texcoord).x;
+    float3 emissive = emissive_sampler.sample(emissive_samplerSmplr, in.frag_texcoord).xyz * push.material_params.z;
+    float2 param = in.frag_texcoord;
+    float3 param_1 = in.frag_tangent;
+    float3 param_2 = in.frag_bitangent;
+    float3 param_3 = in.frag_normal;
+    float3 N = getNormalFromMap(param, param_1, param_2, param_3, normal_sampler, normal_samplerSmplr);
+    float3 V = fast::normalize(float3(ubo.camera_position) - in.frag_pos);
+    float3 F0 = float3(0.039999999105930328369140625);
+    F0 = mix(F0, albedo, float3(metallic));
+    float3 Lo = float3(0.0);
     if (ubo.dir_light_enabled > 0.5)
     {
-        float3 param = float3(ubo.dir_light_direction);
-        float3 param_1 = float3(ubo.dir_light_color);
-        float param_2 = ubo.dir_light_intensity;
-        float3 param_3 = normal;
-        float3 param_4 = view_dir;
-        float3 param_5 = specular_color;
-        float param_6 = shininess;
-        lighting += calculateDirectionalLight(param, param_1, param_2, param_3, param_4, param_5, param_6);
+        float3 L = fast::normalize(-float3(ubo.dir_light_direction));
+        float3 H = fast::normalize(V + L);
+        float3 radiance = float3(ubo.dir_light_color) * ubo.dir_light_intensity;
+        float3 param_4 = N;
+        float3 param_5 = V;
+        float3 param_6 = L;
+        float3 param_7 = H;
+        float3 param_8 = albedo;
+        float param_9 = metallic;
+        float param_10 = roughness;
+        float3 param_11 = F0;
+        float3 param_12 = radiance;
+        Lo += calculatePBR(param_4, param_5, param_6, param_7, param_8, param_9, param_10, param_11, param_12);
     }
     for (uint i = 0u; (i < ubo.point_light_count) && (i < 8u); i++)
     {
         uint idx = i * 2u;
-        float3 position = ubo.point_lights[idx].xyz;
-        float range = ubo.point_lights[idx].w;
-        float3 color = ubo.point_lights[idx + 1u].xyz;
-        float intensity = ubo.point_lights[idx + 1u].w;
-        if (intensity > 0.0)
+        float3 light_pos = ubo.point_lights[idx].xyz;
+        float light_range = ubo.point_lights[idx].w;
+        float3 light_color = ubo.point_lights[idx + 1u].xyz;
+        float light_intensity = ubo.point_lights[idx + 1u].w;
+        if (light_intensity > 0.0)
         {
-            float3 param_7 = position;
-            float param_8 = range;
-            float3 param_9 = color;
-            float param_10 = intensity;
-            float3 param_11 = normal;
-            float3 param_12 = in.frag_pos;
-            float3 param_13 = view_dir;
-            float3 param_14 = specular_color;
-            float param_15 = shininess;
-            lighting += calculatePointLight(param_7, param_8, param_9, param_10, param_11, param_12, param_13, param_14, param_15);
+            float3 L_1 = light_pos - in.frag_pos;
+            float _distance = length(L_1);
+            L_1 = fast::normalize(L_1);
+            float3 H_1 = fast::normalize(V + L_1);
+            float attenuation = 1.0 / (_distance * _distance);
+            attenuation *= smoothstep(light_range, light_range * 0.5, _distance);
+            float3 radiance_1 = (light_color * light_intensity) * attenuation;
+            float3 param_13 = N;
+            float3 param_14 = V;
+            float3 param_15 = L_1;
+            float3 param_16 = H_1;
+            float3 param_17 = albedo;
+            float param_18 = metallic;
+            float param_19 = roughness;
+            float3 param_20 = F0;
+            float3 param_21 = radiance_1;
+            Lo += calculatePBR(param_13, param_14, param_15, param_16, param_17, param_18, param_19, param_20, param_21);
         }
     }
-    float3 result = ((ambient + lighting) * diffuse_tex.xyz) * in.frag_color.xyz;
-    result += (diffuse_tex.xyz * emission);
-    out.out_color = float4(result, (diffuse_tex.w * in.frag_color.w) * push.tint_color.w);
+    float3 ambient = ((ubo.ambient_color.xyz * ubo.ambient_color.w) * albedo) * ao;
+    float3 color = (ambient + Lo) + emissive;
+    color = powr(color, float3(0.4545454680919647216796875));
+    float alpha = (albedo_sampler.sample(albedo_samplerSmplr, in.frag_texcoord).w * in.frag_color.w) * push.tint_color.w;
+    out.out_color = float4(color, alpha);
     return out;
 }
 

@@ -129,8 +129,23 @@ const MaterialEntry = struct {
 pub const MaterialConfig = struct {
     name: [resource_types.MATERIAL_NAME_MAX_LENGTH]u8,
     auto_release: bool,
-    diffuse_colour: math_types.Vec4,
-    diffuse_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8,
+
+    // PBR material properties
+    base_color: math_types.Vec4 = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+    roughness: f32 = 0.8,
+    metallic: f32 = 0.0,
+    emissive_strength: f32 = 0.0,
+
+    // PBR texture map names
+    albedo_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    metallic_roughness_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    normal_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    ao_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    emissive_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+
+    // Legacy support (for backward compatibility)
+    diffuse_colour: math_types.Vec4 = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+    diffuse_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
     specular_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
     specular_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
     shininess: f32 = 32.0,
@@ -166,6 +181,33 @@ pub const MaterialSystem = struct {
                     .generation = 0,
                     .internal_id = 0,
                     .name = [_]u8{0} ** resource_types.MATERIAL_NAME_MAX_LENGTH,
+                    // PBR properties
+                    .base_color = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+                    .roughness = 0.8,
+                    .metallic = 0.0,
+                    .emissive_strength = 0.0,
+                    // PBR texture maps
+                    .albedo_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .metallic_roughness_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .normal_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .ao_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .emissive_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    // Legacy support
                     .diffuse_colour = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
                     .diffuse_map = .{
                         .texture = undefined,
@@ -554,17 +596,46 @@ pub const MaterialSystem = struct {
             if (std.mem.eql(u8, key_trimmed, "name")) {
                 const copy_len = @min(value_trimmed.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
                 @memcpy(config.name[0..copy_len], value_trimmed[0..copy_len]);
-            } else if (std.mem.eql(u8, key_trimmed, "diffuse_colour")) {
-                // Parse "r,g,b,a" format
+            }
+            // PBR material properties
+            else if (std.mem.eql(u8, key_trimmed, "base_color")) {
+                config.base_color = parseVec4(value_trimmed);
+            } else if (std.mem.eql(u8, key_trimmed, "roughness")) {
+                config.roughness = std.fmt.parseFloat(f32, value_trimmed) catch 0.8;
+            } else if (std.mem.eql(u8, key_trimmed, "metallic")) {
+                config.metallic = std.fmt.parseFloat(f32, value_trimmed) catch 0.0;
+            } else if (std.mem.eql(u8, key_trimmed, "emissive_strength")) {
+                config.emissive_strength = std.fmt.parseFloat(f32, value_trimmed) catch 0.0;
+            }
+            // PBR texture maps
+            else if (std.mem.eql(u8, key_trimmed, "albedo_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.albedo_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "metallic_roughness_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.metallic_roughness_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "normal_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.normal_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "ao_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.ao_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "emissive_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.emissive_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            }
+            // Legacy support
+            else if (std.mem.eql(u8, key_trimmed, "diffuse_colour")) {
                 config.diffuse_colour = parseVec4(value_trimmed);
+                config.base_color = config.diffuse_colour; // Also set base_color
             } else if (std.mem.eql(u8, key_trimmed, "diffuse_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.diffuse_map_name[0..copy_len], value_trimmed[0..copy_len]);
+                @memcpy(config.albedo_map_name[0..copy_len], value_trimmed[0..copy_len]); // Also set albedo_map
             } else if (std.mem.eql(u8, key_trimmed, "specular_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.specular_map_name[0..copy_len], value_trimmed[0..copy_len]);
             } else if (std.mem.eql(u8, key_trimmed, "specular_color")) {
-                // Parse "r,g,b" format
                 config.specular_color = parseVec3(value_trimmed);
             } else if (std.mem.eql(u8, key_trimmed, "shininess")) {
                 config.shininess = std.fmt.parseFloat(f32, value_trimmed) catch 32.0;

@@ -47,6 +47,8 @@ struct main0_out
     float2 frag_texcoord [[user(locn1)]];
     float3 frag_normal [[user(locn2)]];
     float3 frag_pos [[user(locn3)]];
+    float3 frag_tangent [[user(locn4)]];
+    float3 frag_bitangent [[user(locn5)]];
     float4 gl_Position [[position]];
 };
 
@@ -55,6 +57,7 @@ struct main0_in
     float3 in_position [[attribute(0)]];
     float3 in_normal [[attribute(1)]];
     float2 in_texcoord [[attribute(2)]];
+    float4 in_tangent [[attribute(3)]];
     float4 in_color [[attribute(4)]];
 };
 
@@ -64,7 +67,14 @@ vertex main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[
     float4 world_pos = push.model * float4(in.in_position, 1.0);
     out.gl_Position = (ubo.projection * ubo.view) * world_pos;
     out.frag_pos = float3(world_pos.xyz);
-    out.frag_normal = fast::normalize(float3x3(push.model[0].xyz, push.model[1].xyz, push.model[2].xyz) * in.in_normal);
+    float3x3 model_mat3 = float3x3(push.model[0].xyz, push.model[1].xyz, push.model[2].xyz);
+    float3 N = fast::normalize(model_mat3 * in.in_normal);
+    out.frag_normal = N;
+    float3 T = fast::normalize(model_mat3 * in.in_tangent.xyz);
+    T = fast::normalize(T - (N * dot(T, N)));
+    float3 B = cross(N, T) * in.in_tangent.w;
+    out.frag_tangent = T;
+    out.frag_bitangent = B;
     out.frag_color = in.in_color;
     out.frag_texcoord = (in.in_texcoord * push.uv_scale) + push.uv_offset;
     return out;

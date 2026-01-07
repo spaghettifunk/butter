@@ -96,14 +96,14 @@ pub fn createGlobalLayout(
     return true;
 }
 
-/// Create the material descriptor set layout (Set 1: Textures only)
+/// Create the material descriptor set layout (Set 1: PBR Textures - 8 bindings)
 pub fn createMaterialLayout(
     context: *vk_context.VulkanContext,
     state: *MaterialDescriptorState,
 ) bool {
-    // Set 1: Material textures
-    var layout_bindings: [2]vk.VkDescriptorSetLayoutBinding = .{
-        // Diffuse texture: set 1, binding 0
+    // Set 1: PBR Material textures (8 bindings)
+    var layout_bindings: [8]vk.VkDescriptorSetLayoutBinding = .{
+        // Binding 0: Albedo texture
         .{
             .binding = 0,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -111,9 +111,57 @@ pub fn createMaterialLayout(
             .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = null,
         },
-        // Specular texture: set 1, binding 1
+        // Binding 1: Metallic-Roughness texture
         .{
             .binding = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Binding 2: Normal texture
+        .{
+            .binding = 2,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Binding 3: AO texture
+        .{
+            .binding = 3,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Binding 4: Emissive texture
+        .{
+            .binding = 4,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Binding 5: Irradiance cubemap (IBL)
+        .{
+            .binding = 5,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Binding 6: Prefiltered environment cubemap (IBL)
+        .{
+            .binding = 6,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        // Binding 7: BRDF LUT
+        .{
+            .binding = 7,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -141,7 +189,7 @@ pub fn createMaterialLayout(
         return false;
     }
 
-    logger.debug("Material descriptor set layout created (Set 1: Textures only).", .{});
+    logger.debug("Material descriptor set layout created (Set 1: 8 PBR textures).", .{});
     return true;
 }
 
@@ -216,11 +264,11 @@ pub fn createMaterialPool(
     context: *vk_context.VulkanContext,
     state: *MaterialDescriptorState,
 ) bool {
-    // Pool size for texture samplers only
+    // Pool size for 8 texture samplers per material
     var pool_sizes: [1]vk.VkDescriptorPoolSize = .{
         .{
             .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = MAX_MATERIAL_DESCRIPTORS * 2, // diffuse + specular per material
+            .descriptorCount = MAX_MATERIAL_DESCRIPTORS * 8, // 8 PBR textures per material
         },
     };
 
@@ -245,7 +293,7 @@ pub fn createMaterialPool(
         return false;
     }
 
-    logger.debug("Material descriptor pool created (max {} materials).", .{MAX_MATERIAL_DESCRIPTORS});
+    logger.debug("Material descriptor pool created (max {} materials, 8 textures each).", .{MAX_MATERIAL_DESCRIPTORS});
     return true;
 }
 
@@ -410,35 +458,122 @@ pub fn updateGlobalSet(
     vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
 }
 
-/// Update a material descriptor set with textures (diffuse and specular)
+/// Legacy function for backward compatibility
 pub fn updateMaterialSet(
     context: *vk_context.VulkanContext,
     descriptor_set: vk.VkDescriptorSet,
     diffuse_texture: *const resource_types.Texture,
     specular_texture: *const resource_types.Texture,
 ) void {
-    if (diffuse_texture.internal_data == null or specular_texture.internal_data == null) {
-        logger.err("Texture has no internal data", .{});
-        return;
+    // Map legacy diffuse/specular to albedo/metallic-roughness
+    updateMaterialSetPBR(
+        context,
+        descriptor_set,
+        diffuse_texture, // albedo
+        specular_texture, // metallic-roughness
+        diffuse_texture, // normal (fallback to albedo if not available)
+        diffuse_texture, // ao (fallback)
+        diffuse_texture, // emissive (fallback)
+        diffuse_texture, // irradiance (fallback - will be replaced in Phase 2)
+        diffuse_texture, // prefiltered (fallback - will be replaced in Phase 2)
+        diffuse_texture, // brdf_lut (fallback - will be replaced in Phase 2)
+    );
+}
+
+/// Update a material descriptor set with all 8 PBR textures
+pub fn updateMaterialSetPBR(
+    context: *vk_context.VulkanContext,
+    descriptor_set: vk.VkDescriptorSet,
+    albedo_texture: *const resource_types.Texture,
+    metallic_roughness_texture: *const resource_types.Texture,
+    normal_texture: *const resource_types.Texture,
+    ao_texture: *const resource_types.Texture,
+    emissive_texture: *const resource_types.Texture,
+    irradiance_texture: *const resource_types.Texture,
+    prefiltered_texture: *const resource_types.Texture,
+    brdf_lut_texture: *const resource_types.Texture,
+) void {
+    // Validate all textures have internal data
+    const textures = [_]*const resource_types.Texture{
+        albedo_texture,
+        metallic_roughness_texture,
+        normal_texture,
+        ao_texture,
+        emissive_texture,
+        irradiance_texture,
+        prefiltered_texture,
+        brdf_lut_texture,
+    };
+
+    for (textures) |tex| {
+        if (tex.internal_data == null) {
+            logger.err("Texture has no internal data", .{});
+            return;
+        }
     }
 
-    const diffuse_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(diffuse_texture.internal_data.?));
-    const specular_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(specular_texture.internal_data.?));
+    // Get internal Vulkan texture data
+    const albedo_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(albedo_texture.internal_data.?));
+    const metallic_roughness_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(metallic_roughness_texture.internal_data.?));
+    const normal_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(normal_texture.internal_data.?));
+    const ao_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(ao_texture.internal_data.?));
+    const emissive_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(emissive_texture.internal_data.?));
+    const irradiance_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(irradiance_texture.internal_data.?));
+    const prefiltered_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(prefiltered_texture.internal_data.?));
+    const brdf_lut_internal: *vulkan_texture.VulkanTexture = @ptrCast(@alignCast(brdf_lut_texture.internal_data.?));
 
-    var diffuse_image_info: vk.VkDescriptorImageInfo = .{
-        .sampler = diffuse_internal.sampler,
-        .imageView = diffuse_internal.image.view,
+    // Prepare descriptor image infos
+    var albedo_info: vk.VkDescriptorImageInfo = .{
+        .sampler = albedo_internal.sampler,
+        .imageView = albedo_internal.image.view,
         .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
 
-    var specular_image_info: vk.VkDescriptorImageInfo = .{
-        .sampler = specular_internal.sampler,
-        .imageView = specular_internal.image.view,
+    var metallic_roughness_info: vk.VkDescriptorImageInfo = .{
+        .sampler = metallic_roughness_internal.sampler,
+        .imageView = metallic_roughness_internal.image.view,
         .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
 
-    var writes: [2]vk.VkWriteDescriptorSet = .{
-        // Diffuse texture at binding 0
+    var normal_info: vk.VkDescriptorImageInfo = .{
+        .sampler = normal_internal.sampler,
+        .imageView = normal_internal.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var ao_info: vk.VkDescriptorImageInfo = .{
+        .sampler = ao_internal.sampler,
+        .imageView = ao_internal.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var emissive_info: vk.VkDescriptorImageInfo = .{
+        .sampler = emissive_internal.sampler,
+        .imageView = emissive_internal.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var irradiance_info: vk.VkDescriptorImageInfo = .{
+        .sampler = irradiance_internal.sampler,
+        .imageView = irradiance_internal.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var prefiltered_info: vk.VkDescriptorImageInfo = .{
+        .sampler = prefiltered_internal.sampler,
+        .imageView = prefiltered_internal.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var brdf_lut_info: vk.VkDescriptorImageInfo = .{
+        .sampler = brdf_lut_internal.sampler,
+        .imageView = brdf_lut_internal.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    // Prepare write descriptor sets for all 8 textures
+    var writes: [8]vk.VkWriteDescriptorSet = .{
+        // Binding 0: Albedo
         .{
             .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = null,
@@ -447,11 +582,11 @@ pub fn updateMaterialSet(
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &diffuse_image_info,
+            .pImageInfo = &albedo_info,
             .pBufferInfo = null,
             .pTexelBufferView = null,
         },
-        // Specular texture at binding 1
+        // Binding 1: Metallic-Roughness
         .{
             .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = null,
@@ -460,7 +595,85 @@ pub fn updateMaterialSet(
             .dstArrayElement = 0,
             .descriptorCount = 1,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &specular_image_info,
+            .pImageInfo = &metallic_roughness_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        },
+        // Binding 2: Normal
+        .{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = descriptor_set,
+            .dstBinding = 2,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &normal_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        },
+        // Binding 3: AO
+        .{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = descriptor_set,
+            .dstBinding = 3,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &ao_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        },
+        // Binding 4: Emissive
+        .{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = descriptor_set,
+            .dstBinding = 4,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &emissive_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        },
+        // Binding 5: Irradiance
+        .{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = descriptor_set,
+            .dstBinding = 5,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &irradiance_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        },
+        // Binding 6: Prefiltered
+        .{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = descriptor_set,
+            .dstBinding = 6,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &prefiltered_info,
+            .pBufferInfo = null,
+            .pTexelBufferView = null,
+        },
+        // Binding 7: BRDF LUT
+        .{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = descriptor_set,
+            .dstBinding = 7,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &brdf_lut_info,
             .pBufferInfo = null,
             .pTexelBufferView = null,
         },
