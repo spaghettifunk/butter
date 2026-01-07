@@ -35,4 +35,8 @@ pub const Material = struct {
     specular_map: TextureMap,
     specular_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
     shininess: f32 = 32.0,
+
+    /// Backend-specific descriptor set (Vulkan: VkDescriptorSet, Metal: null)
+    /// Used for per-material texture binding in the two-tier descriptor architecture
+    descriptor_set: ?*anyopaque = null,
 };

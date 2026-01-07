@@ -433,6 +433,20 @@ pub const MetalBackend = struct {
         }
     }
 
+    /// Allocate a material descriptor set for per-material texture binding
+    /// Metal backend doesn't use descriptor sets, so this is a stub that returns null
+    pub fn allocateMaterialDescriptorSet(
+        self: *MetalBackend,
+        diffuse_texture: *const resource_types.Texture,
+        specular_texture: *const resource_types.Texture,
+    ) ?*anyopaque {
+        _ = self;
+        _ = diffuse_texture;
+        _ = specular_texture;
+        // Metal doesn't use descriptor sets - textures are bound directly
+        return null;
+    }
+
     /// Bind a texture for rendering
     pub fn bindTexture(self: *MetalBackend, texture: ?*const resource_types.Texture) void {
         const encoder = self.context.current_render_encoder orelse return;
@@ -541,6 +555,97 @@ pub const MetalBackend = struct {
                     }
                 },
                 else => {},
+            }
+        }
+    }
+
+    /// Draw mesh asset with submesh support and per-object material
+    pub fn drawMeshAsset(self: *MetalBackend, mesh: *const @import("../../resources/mesh_asset_types.zig").MeshAsset, model_matrix: *const math_types.Mat4, material: ?*const resource_types.Material) void {
+        _ = material; // TODO: Implement per-object materials for Metal backend
+        const encoder = self.context.current_render_encoder orelse return;
+
+        // Push model matrix via setVertexBytes (buffer index 1)
+        const push_constant = metal_pipeline.PushConstantObject{
+            .model = model_matrix.*,
+        };
+        metal_pipeline.pushConstants(encoder, &push_constant);
+
+        const gpu_data = mesh.gpu_data orelse return;
+        const mesh_gpu = switch (gpu_data.*) {
+            .metal => |*m| m,
+            else => return,
+        };
+
+        // Buffer indices must match pipeline vertex descriptor:
+        // 0 = GlobalUBO, 1 = PushConstants, 2 = Vertex data
+        const VERTEX_BUFFER_INDEX: u64 = 2;
+
+        // Bind vertex buffer
+        if (mesh_gpu.vertex_buffer.handle) |vertex_handle| {
+            msg3(
+                void,
+                encoder,
+                sel("setVertexBuffer:offset:atIndex:"),
+                vertex_handle,
+                @as(u64, 0),
+                VERTEX_BUFFER_INDEX,
+            );
+        }
+
+        // Draw
+        if (mesh.index_count > 0 and mesh_gpu.index_buffer.handle != null) {
+            // Draw indexed
+            if (mesh.submesh_count > 0) {
+                // Draw all submeshes
+                for (mesh.submeshes[0..mesh.submesh_count]) |*submesh| {
+                    const index_offset_bytes = @as(u64, submesh.index_offset) * 4; // u32 indices
+                    msg5(
+                        void,
+                        encoder,
+                        sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"),
+                        metal_context.MTLPrimitiveType.Triangle,
+                        @as(u64, submesh.index_count),
+                        metal_context.MTLIndexType.UInt32,
+                        mesh_gpu.index_buffer.handle.?,
+                        index_offset_bytes,
+                    );
+                }
+            } else {
+                // Draw entire mesh
+                msg5(
+                    void,
+                    encoder,
+                    sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"),
+                    metal_context.MTLPrimitiveType.Triangle,
+                    @as(u64, mesh.index_count),
+                    metal_context.MTLIndexType.UInt32,
+                    mesh_gpu.index_buffer.handle.?,
+                    @as(u64, 0),
+                );
+            }
+        } else {
+            // Non-indexed draw
+            if (mesh.submesh_count > 0) {
+                // Draw all submeshes
+                for (mesh.submeshes[0..mesh.submesh_count]) |*submesh| {
+                    msg3(
+                        void,
+                        encoder,
+                        sel("drawPrimitives:vertexStart:vertexCount:"),
+                        metal_context.MTLPrimitiveType.Triangle,
+                        @as(u64, submesh.vertex_offset),
+                        @as(u64, submesh.vertex_count),
+                    );
+                }
+            } else {
+                msg3(
+                    void,
+                    encoder,
+                    sel("drawPrimitives:vertexStart:vertexCount:"),
+                    metal_context.MTLPrimitiveType.Triangle,
+                    @as(u64, 0),
+                    @as(u64, mesh.vertex_count),
+                );
             }
         }
     }

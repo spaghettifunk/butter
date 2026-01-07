@@ -6,6 +6,11 @@ using namespace metal;
 struct PushConstants
 {
     float4x4 model;
+    float4 tint_color;
+    float4 material_params;
+    float2 uv_offset;
+    float2 uv_scale;
+    uint flags;
 };
 
 struct GlobalUBO
@@ -61,7 +66,7 @@ vertex main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[
     out.frag_pos = float3(world_pos.xyz);
     out.frag_normal = fast::normalize(float3x3(push.model[0].xyz, push.model[1].xyz, push.model[2].xyz) * in.in_normal);
     out.frag_color = in.in_color;
-    out.frag_texcoord = in.in_texcoord;
+    out.frag_texcoord = (in.in_texcoord * push.uv_scale) + push.uv_offset;
     return out;
 }
 

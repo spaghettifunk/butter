@@ -5,7 +5,6 @@
 const std = @import("std");
 const math = @import("../math/math.zig");
 const mesh_asset_system = @import("../systems/mesh_asset.zig");
-const geometry_system = @import("../systems/geometry.zig");
 const handle = @import("../resources/handle.zig");
 
 /// Invalid object ID constant
@@ -59,7 +58,6 @@ pub const Transform = struct {
 pub const EditorObject = struct {
     id: EditorObjectId = INVALID_OBJECT_ID,
     name: [OBJECT_NAME_MAX_LENGTH]u8 = [_]u8{0} ** OBJECT_NAME_MAX_LENGTH,
-    geometry: handle.GeometryHandle = handle.GeometryHandle.invalid, // DEPRECATED: Use mesh_asset
     mesh_asset: handle.MeshAssetHandle = handle.MeshAssetHandle.invalid,
     material: handle.MaterialHandle = handle.MaterialHandle.invalid,
     transform: Transform = .{},
@@ -79,9 +77,9 @@ pub const EditorObject = struct {
         return self.mesh_asset.id;
     }
 
-    /// Get geometry ID for backwards compatibility
+    /// Get geometry ID for backwards compatibility (returns mesh_asset id)
     pub fn getGeometryId(self: *const EditorObject) u32 {
-        return self.geometry.id;
+        return self.mesh_asset.id;
     }
 
     /// Get material ID for backwards compatibility with systems that use raw IDs
@@ -117,7 +115,6 @@ pub const EditorScene = struct {
         var obj = EditorObject{
             .id = id,
             .mesh_asset = mesh_asset,
-            .geometry = .{ .id = 0, .generation = 0 }, // Not using geometry anymore
             .material = material,
         };
 
@@ -136,16 +133,15 @@ pub const EditorScene = struct {
         return id;
     }
 
-    /// Add a new object to the scene using raw IDs (backwards compatibility)
-    /// Takes geometry_id for backward compatibility - stores in both geometry and mesh_asset fields
-    pub fn addObjectById(self: *EditorScene, name: []const u8, geometry_id: u32, material_id: u32) EditorObjectId {
+    /// Add a new object to the scene using raw IDs
+    /// Takes mesh_id and stores in mesh_asset field (new system)
+    pub fn addObjectById(self: *EditorScene, name: []const u8, mesh_id: u32, material_id: u32) EditorObjectId {
         const id = self.next_id;
         self.next_id += 1;
 
         var obj = EditorObject{
             .id = id,
-            .geometry = .{ .id = geometry_id, .generation = 0 },
-            .mesh_asset = .{ .id = 0, .generation = 0 }, // Not used in legacy mode
+            .mesh_asset = .{ .id = mesh_id, .generation = 0 },
             .material = .{ .id = material_id, .generation = 0 },
         };
 
@@ -205,27 +201,19 @@ pub const EditorScene = struct {
         return self.objects.items.len;
     }
 
-    /// Update world bounds from geometry/mesh asset and transform
+    /// Update world bounds from mesh asset and transform
     pub fn updateBoundsFromGeometry(self: *EditorScene, obj: *EditorObject) void {
         _ = self;
 
-        // Get bounding box (try both legacy geometry and new mesh_asset)
+        // Get bounding box from mesh_asset
         var local_min: [3]f32 = .{ -0.5, -0.5, -0.5 };
         var local_max: [3]f32 = .{ 0.5, 0.5, 0.5 };
 
-        // Try new mesh_asset system first
         if (obj.mesh_asset.isValid()) {
             const mesh_sys = mesh_asset_system.getSystem() orelse return;
             if (mesh_sys.getMesh(obj.mesh_asset.id)) |mesh| {
                 local_min = mesh.bounding_min;
                 local_max = mesh.bounding_max;
-            }
-        }
-        // Fall back to legacy geometry system
-        else if (obj.geometry.isValid()) {
-            if (geometry_system.getGeometry(obj.geometry.id)) |geo| {
-                local_min = geo.bounding_min;
-                local_max = geo.bounding_max;
             }
         }
 

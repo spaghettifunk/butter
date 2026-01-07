@@ -15,11 +15,38 @@ pub const Vertex3D = math.Vertex3D;
 /// Push constant data for per-object rendering.
 /// Push constants are small, fast-access data sent directly with draw commands.
 /// Maximum size is typically 128 bytes on most hardware (256 bytes guaranteed by spec).
-/// Total size: 64 bytes (model matrix only - most commonly updated per-object data)
+/// Total size: 128 bytes (expanded to support per-draw material parameters)
 pub const PushConstantObject = extern struct {
     /// Model transformation matrix (64 bytes)
     model: math.Mat4 = math.mat4Identity(),
+
+    /// Material tint color (16 bytes) - multiplied with diffuse texture
+    tint_color: math.Vec4 = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+
+    /// Material parameters (16 bytes)
+    /// x: roughness (0-1), y: metallic (0-1), z: emission strength, w: padding
+    material_params: math.Vec4 = .{ .elements = .{ 0.8, 0.0, 0.0, 0.0 } },
+
+    /// UV transform: offset (8 bytes)
+    uv_offset: math.Vec2 = .{ .elements = .{ 0.0, 0.0 } },
+
+    /// UV transform: scale (8 bytes)
+    uv_scale: math.Vec2 = .{ .elements = .{ 1.0, 1.0 } },
+
+    /// Material flags (4 bytes)
+    /// Bit 0: Use vertex colors, Bit 1: Use normal map, etc.
+    flags: u32 = 0,
+
+    /// Padding to align to 128 bytes (12 bytes)
+    _pad: [3]u32 = .{ 0, 0, 0 },
 };
+
+// Compile-time assertion to ensure PushConstantObject is exactly 128 bytes
+comptime {
+    if (@sizeOf(PushConstantObject) != 128) {
+        @compileError("PushConstantObject must be exactly 128 bytes");
+    }
+}
 
 /// Vulkan graphics pipeline state
 pub const VulkanPipeline = struct {
@@ -102,10 +129,24 @@ pub fn getVertexAttributeDescriptions() [5]vk.VkVertexInputAttributeDescription 
 }
 
 /// Create the graphics pipeline for the material shader
+/// Supports both legacy single descriptor set and new two-tier architecture
 pub fn createMaterialPipeline(
     context: *vk_context.VulkanContext,
     material_shader: *MaterialShader,
     descriptor_layout: vk.VkDescriptorSetLayout,
+    renderpass: vk.VkRenderPass,
+) bool {
+    return createMaterialPipelineWithLayouts(context, material_shader, descriptor_layout, null, renderpass);
+}
+
+/// Create the graphics pipeline for the material shader with explicit descriptor set layouts
+/// For two-tier architecture: global_layout (Set 0) and material_layout (Set 1)
+/// For legacy: only global_layout is used (combined UBO + textures)
+pub fn createMaterialPipelineWithLayouts(
+    context: *vk_context.VulkanContext,
+    material_shader: *MaterialShader,
+    global_layout: vk.VkDescriptorSetLayout,
+    material_layout: ?vk.VkDescriptorSetLayout,
     renderpass: vk.VkRenderPass,
 ) bool {
     logger.debug("Creating material shader pipeline...", .{});
@@ -242,21 +283,30 @@ pub fn createMaterialPipeline(
         .pDynamicStates = &dynamic_states,
     };
 
-    // Push constant range for per-object data (model matrix)
-    // Accessible from vertex shader for transformations
+    // Push constant range for per-object data (model matrix + material parameters)
+    // Accessible from both vertex shader (for transformations) and fragment shader (for material params)
     var push_constant_range: vk.VkPushConstantRange = .{
-        .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT,
+        .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
         .size = @sizeOf(PushConstantObject),
     };
 
-    // Pipeline layout
+    // Pipeline layout - supports both single (legacy) and dual (two-tier) descriptor sets
+    var set_layouts: [2]vk.VkDescriptorSetLayout = undefined;
+    var set_layout_count: u32 = 1;
+    set_layouts[0] = global_layout;
+
+    if (material_layout) |mat_layout| {
+        set_layouts[1] = mat_layout;
+        set_layout_count = 2;
+    }
+
     var layout_info: vk.VkPipelineLayoutCreateInfo = .{
         .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pNext = null,
         .flags = 0,
-        .setLayoutCount = 1,
-        .pSetLayouts = &descriptor_layout,
+        .setLayoutCount = set_layout_count,
+        .pSetLayouts = &set_layouts,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push_constant_range,
     };
@@ -364,6 +414,7 @@ pub fn bindDescriptorSets(
 
 /// Push constants to the command buffer for per-object data
 /// This is more efficient than updating uniform buffers for frequently changing data
+/// Pushes to both vertex and fragment shader stages (128 bytes total)
 pub fn pushConstants(
     command_buffer: vk.VkCommandBuffer,
     layout: vk.VkPipelineLayout,
@@ -372,7 +423,7 @@ pub fn pushConstants(
     vk.vkCmdPushConstants(
         command_buffer,
         layout,
-        vk.VK_SHADER_STAGE_VERTEX_BIT,
+        vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         @sizeOf(PushConstantObject),
         push_constant,

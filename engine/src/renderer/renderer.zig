@@ -260,6 +260,15 @@ pub const Backend = union(BackendType) {
         }
     }
 
+    /// Draw mesh asset with submesh support and per-object material
+    pub fn drawMeshAsset(self: *Backend, mesh: *const @import("../resources/mesh_asset_types.zig").MeshAsset, model_matrix: *const math_types.Mat4, material: ?*const resource_types.Material) void {
+        switch (self.*) {
+            .vulkan => |*v| v.drawMeshAsset(mesh, model_matrix, material),
+            .metal => |*m| m.drawMeshAsset(mesh, model_matrix, material),
+            else => {},
+        }
+    }
+
     /// Get the current command buffer handle for render graph passes (Vulkan only)
     /// Returns null if not currently recording a frame or not Vulkan backend
     pub fn getCurrentCommandBuffer(self: *Backend) ?*anyopaque {
@@ -558,6 +567,11 @@ pub const RendererSystem = struct {
     /// Bind geometry buffers for drawing (without issuing draw call)
     pub fn bindGeometry(self: *RendererSystem, geo: *const geometry_types.Geometry) void {
         self.backend.bindGeometry(geo);
+    }
+
+    /// Draw mesh asset with submesh support and per-object material
+    pub fn drawMeshAsset(self: *RendererSystem, mesh: *const @import("../resources/mesh_asset_types.zig").MeshAsset, model_matrix: *const math_types.Mat4, material: ?*const resource_types.Material) void {
+        self.backend.drawMeshAsset(mesh, model_matrix, material);
     }
 };
 

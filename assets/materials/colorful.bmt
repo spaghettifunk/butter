@@ -1,0 +1,5 @@
+# Colorful material
+name=colorful
+diffuse_colour=1.0,1.0,1.0,1.0
+diffuse_map=../assets/textures/colorful.jpg
+auto_release=true
