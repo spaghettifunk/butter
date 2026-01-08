@@ -1,0 +1,39 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct PushConstants
+{
+    float4x4 model;
+    float4 material_params;
+    uint cascade_index;
+};
+
+struct ShadowUBO
+{
+    float4x4 cascade_view_proj[4];
+    float4 cascade_splits;
+    float4 shadow_params;
+    float4 point_shadow_enabled;
+    float4 point_shadow_indices;
+};
+
+struct main0_out
+{
+    float4 gl_Position [[position]];
+};
+
+struct main0_in
+{
+    float3 in_position [[attribute(0)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[buffer(0)]], constant ShadowUBO& shadow_ubo [[buffer(1)]])
+{
+    main0_out out = {};
+    float4 world_pos = push.model * float4(in.in_position, 1.0);
+    out.gl_Position = shadow_ubo.cascade_view_proj[push.cascade_index] * world_pos;
+    return out;
+}
+

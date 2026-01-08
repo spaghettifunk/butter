@@ -55,16 +55,37 @@ pub const GridShaderDescriptorState = struct {
         [_]vk.VkDescriptorSet{null} ** MAX_DESCRIPTOR_SETS,
 };
 
-/// Create the global descriptor set layout (Set 0: UBO only)
+/// Shadow descriptor state (Set 2 - shadow map textures)
+pub const ShadowDescriptorState = struct {
+    /// Descriptor set layout for shadow maps
+    layout: vk.VkDescriptorSetLayout = null,
+
+    /// Descriptor pool
+    pool: vk.VkDescriptorPool = null,
+
+    /// Descriptor sets (one per frame in flight)
+    sets: [MAX_DESCRIPTOR_SETS]vk.VkDescriptorSet =
+        [_]vk.VkDescriptorSet{null} ** MAX_DESCRIPTOR_SETS,
+};
+
+/// Create the global descriptor set layout (Set 0: GlobalUBO + ShadowUBO)
 /// This is the new two-tier architecture where textures are in Set 1
 pub fn createGlobalLayout(
     context: *vk_context.VulkanContext,
     state: *GlobalDescriptorState,
 ) bool {
     // Set 0, Binding 0: Global UBO (camera, lights, etc.)
-    var layout_bindings: [1]vk.VkDescriptorSetLayoutBinding = .{
+    // Set 0, Binding 1: Shadow UBO (shadow matrices and params)
+    var layout_bindings: [2]vk.VkDescriptorSetLayoutBinding = .{
         .{
             .binding = 0,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        .{
+            .binding = 1,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
             .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -226,11 +247,11 @@ pub fn createGlobalPool(
     state: *GlobalDescriptorState,
     max_sets: u32,
 ) bool {
-    // Pool size for uniform buffers only
+    // Pool size for uniform buffers (GlobalUBO + ShadowUBO per frame)
     var pool_sizes: [1]vk.VkDescriptorPoolSize = .{
         .{
             .type = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = max_sets,
+            .descriptorCount = max_sets * 2, // 2 UBOs per set (GlobalUBO + ShadowUBO)
         },
     };
 
@@ -430,7 +451,7 @@ pub fn freeMaterialSet(
     }
 }
 
-/// Update a global descriptor set with buffer info (UBO only)
+/// Update a global descriptor set with buffer info (GlobalUBO at binding 0)
 pub fn updateGlobalSet(
     context: *vk_context.VulkanContext,
     state: *GlobalDescriptorState,
@@ -447,6 +468,34 @@ pub fn updateGlobalSet(
         .pNext = null,
         .dstSet = state.global_sets[set_index],
         .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .pImageInfo = null,
+        .pBufferInfo = buffer_info,
+        .pTexelBufferView = null,
+    };
+
+    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
+}
+
+/// Update a global descriptor set with shadow UBO buffer info (binding 1)
+pub fn updateShadowSet(
+    context: *vk_context.VulkanContext,
+    state: *GlobalDescriptorState,
+    set_index: u32,
+    buffer_info: *const vk.VkDescriptorBufferInfo,
+) void {
+    if (set_index >= MAX_DESCRIPTOR_SETS) {
+        logger.err("Invalid descriptor set index: {}", .{set_index});
+        return;
+    }
+
+    var write: vk.VkWriteDescriptorSet = .{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = null,
+        .dstSet = state.global_sets[set_index],
+        .dstBinding = 1,
         .dstArrayElement = 0,
         .descriptorCount = 1,
         .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -904,4 +953,227 @@ pub fn updateGridSet(
         0,
         null,
     );
+}
+
+// =========================================================================
+// Shadow Descriptor Functions (Set 2)
+// =========================================================================
+
+/// Create shadow descriptor set layout (Set 2: shadow map textures)
+pub fn createShadowLayout(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+) bool {
+    // Set 2, Binding 0: Directional cascade shadow maps (sampler2DArray with 4 layers)
+    // Set 2, Binding 1: Point light shadow cubemaps (samplerCubeArray - for Phase 4)
+    var layout_bindings: [2]vk.VkDescriptorSetLayoutBinding = .{
+        .{
+            .binding = 0,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 4, // 4 cascade layers
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+        .{
+            .binding = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 4, // Up to 4 point light shadow cubemaps
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = null,
+        },
+    };
+
+    var layout_info: vk.VkDescriptorSetLayoutCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .bindingCount = layout_bindings.len,
+        .pBindings = &layout_bindings,
+    };
+
+    const result = vk.vkCreateDescriptorSetLayout(
+        context.device,
+        &layout_info,
+        context.allocator,
+        &state.layout,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateDescriptorSetLayout (shadow) failed: {}", .{result});
+        return false;
+    }
+
+    logger.debug("Shadow descriptor set layout created (Set 2).", .{});
+    return true;
+}
+
+/// Destroy shadow descriptor set layout
+pub fn destroyShadowLayout(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+) void {
+    if (context.device == null) return;
+
+    if (state.layout) |layout| {
+        vk.vkDestroyDescriptorSetLayout(context.device, layout, context.allocator);
+        state.layout = null;
+    }
+}
+
+/// Create shadow descriptor pool
+pub fn createShadowPool(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+    max_sets: u32,
+) bool {
+    // Pool sizes for shadow map textures (cascades + point lights)
+    var pool_sizes: [1]vk.VkDescriptorPoolSize = .{
+        .{
+            .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = max_sets * 8, // 4 cascades + 4 point cubemaps per set
+        },
+    };
+
+    var pool_info: vk.VkDescriptorPoolCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .maxSets = max_sets,
+        .poolSizeCount = pool_sizes.len,
+        .pPoolSizes = &pool_sizes,
+    };
+
+    const result = vk.vkCreateDescriptorPool(
+        context.device,
+        &pool_info,
+        context.allocator,
+        &state.pool,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateDescriptorPool (shadow) failed: {}", .{result});
+        return false;
+    }
+
+    logger.debug("Shadow descriptor pool created.", .{});
+    return true;
+}
+
+/// Destroy shadow descriptor pool
+pub fn destroyShadowPool(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+) void {
+    if (context.device == null) return;
+
+    if (state.pool) |pool| {
+        vk.vkDestroyDescriptorPool(context.device, pool, context.allocator);
+        state.pool = null;
+    }
+
+    for (&state.sets) |*set| {
+        set.* = null;
+    }
+}
+
+/// Allocate shadow descriptor sets
+pub fn allocateShadowSets(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+    count: u32,
+) bool {
+    if (state.pool == null or state.layout == null) {
+        logger.err("Cannot allocate shadow descriptor sets: pool or layout is null", .{});
+        return false;
+    }
+
+    if (count > MAX_DESCRIPTOR_SETS) {
+        logger.err("Cannot allocate {} shadow descriptor sets (max: {})", .{ count, MAX_DESCRIPTOR_SETS });
+        return false;
+    }
+
+    var layouts: [MAX_DESCRIPTOR_SETS]vk.VkDescriptorSetLayout = undefined;
+    for (0..count) |i| {
+        layouts[i] = state.layout;
+    }
+
+    var alloc_info: vk.VkDescriptorSetAllocateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = null,
+        .descriptorPool = state.pool,
+        .descriptorSetCount = count,
+        .pSetLayouts = &layouts,
+    };
+
+    const result = vk.vkAllocateDescriptorSets(
+        context.device,
+        &alloc_info,
+        &state.sets,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkAllocateDescriptorSets (shadow) failed: {}", .{result});
+        return false;
+    }
+
+    logger.debug("Allocated {} shadow descriptor sets.", .{count});
+    return true;
+}
+
+/// Update shadow descriptor set with cascade shadow map textures
+pub fn updateShadowDescriptorSet(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+    set_index: u32,
+    cascade_image_infos: []const vk.VkDescriptorImageInfo,
+) void {
+    if (set_index >= MAX_DESCRIPTOR_SETS) return;
+    if (cascade_image_infos.len != 4) {
+        logger.err("Expected 4 cascade shadow maps, got {}", .{cascade_image_infos.len});
+        return;
+    }
+
+    var write: vk.VkWriteDescriptorSet = .{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = null,
+        .dstSet = state.sets[set_index],
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorCount = @intCast(cascade_image_infos.len),
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = cascade_image_infos.ptr,
+        .pBufferInfo = null,
+        .pTexelBufferView = null,
+    };
+
+    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
+}
+
+/// Update shadow descriptor set with point light shadow cubemaps
+pub fn updatePointShadowDescriptorSet(
+    context: *vk_context.VulkanContext,
+    state: *ShadowDescriptorState,
+    set_index: u32,
+    point_image_infos: []const vk.VkDescriptorImageInfo,
+) void {
+    if (set_index >= MAX_DESCRIPTOR_SETS) return;
+    if (point_image_infos.len == 0 or point_image_infos.len > 4) {
+        logger.err("Expected 1-4 point shadow cubemaps, got {}", .{point_image_infos.len});
+        return;
+    }
+
+    var write: vk.VkWriteDescriptorSet = .{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = null,
+        .dstSet = state.sets[set_index],
+        .dstBinding = 1,
+        .dstArrayElement = 0,
+        .descriptorCount = @intCast(point_image_infos.len),
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = point_image_infos.ptr,
+        .pBufferInfo = null,
+        .pTexelBufferView = null,
+    };
+
+    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
 }

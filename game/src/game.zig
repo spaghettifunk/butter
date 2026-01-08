@@ -127,6 +127,13 @@ fn initializeTestScene(state: *GameState) void {
     };
     engine.logger.info("Loaded colorful material through ResourceManager with ID: {d}", .{colorful_handle.id});
 
+    // Load rock PBR material for testing
+    const rock_handle = resource_mgr.loadMaterial("rock") catch |err| {
+        engine.logger.warn("Failed to load rock material through ResourceManager: {}", .{err});
+        return;
+    };
+    engine.logger.info("Loaded rock PBR material through ResourceManager with ID: {d}", .{rock_handle.id});
+
     // Generate procedural meshes using Resource Manager
     const cube_handle = resource_mgr.loadMeshCube(.{
         .name = "test_cube",
@@ -192,14 +199,14 @@ fn initializeTestScene(state: *GameState) void {
         engine.logger.info("Added Sphere to scene with object ID: {d}", .{sphere_id});
     }
 
-    // Add ground plane with colorful material
+    // Add ground plane with rock PBR material
     if (state.plane_mesh != 0) {
-        const plane_id = scene.addObjectById("Ground", state.plane_mesh, colorful_handle.id);
+        const plane_id = scene.addObjectById("Ground", state.plane_mesh, rock_handle.id);
         if (scene.getObject(plane_id)) |obj| {
             obj.transform.position = .{ 0.0, -0.5, 0.0 }; // Below other objects so camera can see it from above
             scene.updateBounds(obj);
         }
-        engine.logger.info("Added Ground plane to scene with object ID: {d}", .{plane_id});
+        engine.logger.info("Added Ground plane to scene with rock PBR material (object ID: {d})", .{plane_id});
     }
 
     // Create cone mesh with colorful material

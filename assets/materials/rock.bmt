@@ -1,0 +1,9 @@
+name=rock
+base_color=1.0,1.0,1.0,1.0
+albedo_map=../assets/textures/rock/color.png
+metallic_roughness_map=../assets/textures/rock/roughness.png
+normal_map=../assets/textures/rock/normalGL.png
+ao_map=../assets/textures/rock/ambient_occlusion.png
+roughness=1.0
+metallic=0.0
+emissive_strength=0.0

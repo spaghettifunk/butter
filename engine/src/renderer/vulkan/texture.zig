@@ -59,11 +59,13 @@ pub fn createWithFilter(
     internal_data.* = .{};
 
     // Determine format based on channel count
+    // Use SRGB format for color textures (3-4 channels) for proper color representation
+    // Use UNORM for single/dual channel textures (normal maps, masks, etc.)
     const format: vk.VkFormat = switch (channel_count) {
         1 => vk.VK_FORMAT_R8_UNORM,
         2 => vk.VK_FORMAT_R8G8_UNORM,
-        3 => vk.VK_FORMAT_R8G8B8_UNORM,
-        4 => vk.VK_FORMAT_R8G8B8A8_UNORM,
+        3 => vk.VK_FORMAT_R8G8B8_SRGB,
+        4 => vk.VK_FORMAT_R8G8B8A8_SRGB,
         else => {
             logger.err("Unsupported channel count: {}", .{channel_count});
             std.heap.page_allocator.destroy(internal_data);

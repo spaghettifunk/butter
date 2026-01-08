@@ -227,3 +227,99 @@ pub fn updateRenderArea(renderpass: *VulkanRenderpass, width: u32, height: u32) 
 pub fn setClearColor(renderpass: *VulkanRenderpass, r: f32, g: f32, b: f32, a: f32) void {
     renderpass.clear_color.float32 = .{ r, g, b, a };
 }
+
+/// Create a shadow map renderpass (depth-only rendering)
+/// Used for rendering cascade shadow maps and point light shadow cubemaps
+pub fn createShadowRenderpass(
+    context: *vk_context.VulkanContext,
+    renderpass: *VulkanRenderpass,
+    width: u32,
+    height: u32,
+) bool {
+    logger.debug("Creating shadow renderpass...", .{});
+
+    const render_area = vk.VkRect2D{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = .{ .width = width, .height = height },
+    };
+
+    renderpass.render_area = render_area;
+    renderpass.depth = 1.0;
+    renderpass.stencil = 0;
+
+    // Depth attachment only (D32_SFLOAT for high precision)
+    const depth_attachment: vk.VkAttachmentDescription = .{
+        .flags = 0,
+        .format = vk.VK_FORMAT_D32_SFLOAT,
+        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = vk.VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = vk.VK_ATTACHMENT_STORE_OP_STORE, // Store for sampling in main pass
+        .stencilLoadOp = vk.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = vk.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, // For sampling
+    };
+
+    var depth_attachment_ref: vk.VkAttachmentReference = .{
+        .attachment = 0,
+        .layout = vk.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
+    // Single subpass for depth rendering
+    var subpass: vk.VkSubpassDescription = .{
+        .flags = 0,
+        .pipelineBindPoint = vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .inputAttachmentCount = 0,
+        .pInputAttachments = null,
+        .colorAttachmentCount = 0, // No color attachments
+        .pColorAttachments = null,
+        .pResolveAttachments = null,
+        .pDepthStencilAttachment = &depth_attachment_ref,
+        .preserveAttachmentCount = 0,
+        .pPreserveAttachments = null,
+    };
+
+    // Subpass dependency for proper synchronization
+    var dependency: vk.VkSubpassDependency = .{
+        .srcSubpass = vk.VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = vk.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+            vk.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        .dstStageMask = vk.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+            vk.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = vk.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dependencyFlags = 0,
+    };
+
+    // Create renderpass
+    const attachments = [_]vk.VkAttachmentDescription{depth_attachment};
+
+    var create_info: vk.VkRenderPassCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .attachmentCount = attachments.len,
+        .pAttachments = &attachments,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = 1,
+        .pDependencies = &dependency,
+    };
+
+    const result = vk.vkCreateRenderPass(
+        context.device,
+        &create_info,
+        context.allocator,
+        &renderpass.handle,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateRenderPass (shadow) failed with result: {}", .{result});
+        return false;
+    }
+
+    renderpass.state = .ready;
+    logger.info("Shadow renderpass created.", .{});
+    return true;
+}

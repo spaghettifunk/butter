@@ -5,11 +5,13 @@
 
 using namespace metal;
 
-struct PushConstants
+struct ShadowUBO
 {
-    char _m0_pad[64];
-    float4 tint_color;
-    float4 material_params;
+    float4x4 cascade_view_proj[4];
+    float4 cascade_splits;
+    float4 shadow_params;
+    float4 point_shadow_enabled;
+    float4 point_shadow_indices;
 };
 
 struct GlobalUBO
@@ -37,6 +39,13 @@ struct GlobalUBO
     float4 ambient_color;
 };
 
+struct PushConstants
+{
+    char _m0_pad[64];
+    float4 tint_color;
+    float4 material_params;
+};
+
 struct main0_out
 {
     float4 out_color [[color(0)]];
@@ -58,6 +67,93 @@ float3 getNormalFromMap(thread const float2& uv, thread const float3& tangent, t
     float3 tangent_normal = (normal_sampler.sample(normal_samplerSmplr, uv).xyz * 2.0) - float3(1.0);
     float3x3 TBN = float3x3(float3(tangent), float3(bitangent), float3(normal));
     return fast::normalize(TBN * tangent_normal);
+}
+
+static inline __attribute__((always_inline))
+int getCascadeIndex(thread const float& view_depth, constant ShadowUBO& shadow_ubo)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        if (view_depth < shadow_ubo.cascade_splits[i])
+        {
+            return i;
+        }
+    }
+    return 3;
+}
+
+static inline __attribute__((always_inline))
+float sampleDirectionalShadow(thread const float3& world_pos, thread const float3& normal, thread const float3& light_dir, constant ShadowUBO& shadow_ubo, constant GlobalUBO& ubo, thread const array<texture2d<float>, 4>& cascade_shadow_maps, thread const array<sampler, 4>& cascade_shadow_mapsSmplr)
+{
+    if (shadow_ubo.shadow_params.w < 0.5)
+    {
+        return 1.0;
+    }
+    float4 view_pos = ubo.view * float4(world_pos, 1.0);
+    float view_depth = abs(view_pos.z);
+    float param = view_depth;
+    int cascade_index = getCascadeIndex(param, shadow_ubo);
+    float4 light_space_pos = shadow_ubo.cascade_view_proj[cascade_index] * float4(world_pos, 1.0);
+    float3 proj_coords = light_space_pos.xyz / float3(light_space_pos.w);
+    proj_coords = (proj_coords * 0.5) + float3(0.5);
+    bool _484 = proj_coords.x < 0.0;
+    bool _491;
+    if (!_484)
+    {
+        _491 = proj_coords.x > 1.0;
+    }
+    else
+    {
+        _491 = _484;
+    }
+    bool _498;
+    if (!_491)
+    {
+        _498 = proj_coords.y < 0.0;
+    }
+    else
+    {
+        _498 = _491;
+    }
+    bool _505;
+    if (!_498)
+    {
+        _505 = proj_coords.y > 1.0;
+    }
+    else
+    {
+        _505 = _498;
+    }
+    bool _512;
+    if (!_505)
+    {
+        _512 = proj_coords.z > 1.0;
+    }
+    else
+    {
+        _512 = _505;
+    }
+    if (_512)
+    {
+        return 1.0;
+    }
+    float bias0 = shadow_ubo.shadow_params.x;
+    float slope_bias = shadow_ubo.shadow_params.y;
+    float NdotL = fast::max(dot(normal, light_dir), 0.0);
+    float total_bias = bias0 + (slope_bias * (1.0 - NdotL));
+    float shadow = 0.0;
+    float2 texel_size = float2(1.0) / float2(int2(cascade_shadow_maps[cascade_index].get_width(), cascade_shadow_maps[cascade_index].get_height()));
+    for (int x = -2; x <= 1; x++)
+    {
+        for (int y = -2; y <= 1; y++)
+        {
+            float2 offset = float2(float(x), float(y)) * texel_size;
+            float pcf_depth = cascade_shadow_maps[cascade_index].sample(cascade_shadow_mapsSmplr[cascade_index], (proj_coords.xy + offset)).x;
+            shadow += float((proj_coords.z - total_bias) > pcf_depth);
+        }
+    }
+    shadow /= 16.0;
+    return 1.0 - shadow;
 }
 
 static inline __attribute__((always_inline))
@@ -128,11 +224,57 @@ float3 calculatePBR(thread const float3& N, thread const float3& V, thread const
     return ((((kD * albedo) / float3(3.1415927410125732421875)) + specular) * radiance) * NdotL;
 }
 
-fragment main0_out main0(main0_in in [[stage_in]], constant PushConstants& push [[buffer(0)]], constant GlobalUBO& ubo [[buffer(1)]], texture2d<float> normal_sampler [[texture(0)]], texture2d<float> albedo_sampler [[texture(1)]], texture2d<float> metallic_roughness_sampler [[texture(2)]], texture2d<float> ao_sampler [[texture(3)]], texture2d<float> emissive_sampler [[texture(4)]], sampler normal_samplerSmplr [[sampler(0)]], sampler albedo_samplerSmplr [[sampler(1)]], sampler metallic_roughness_samplerSmplr [[sampler(2)]], sampler ao_samplerSmplr [[sampler(3)]], sampler emissive_samplerSmplr [[sampler(4)]])
+static inline __attribute__((always_inline))
+float samplePointShadow(thread const float3& world_pos, thread const uint& light_index, thread const float3& light_pos, thread const float& light_range, constant ShadowUBO& shadow_ubo, thread const array<texturecube<float>, 4>& point_shadow_cubemaps, thread const array<sampler, 4>& point_shadow_cubemapsSmplr)
+{
+    if (shadow_ubo.point_shadow_enabled[light_index] < 0.5)
+    {
+        return 1.0;
+    }
+    int shadow_index = int(shadow_ubo.point_shadow_indices[light_index]);
+    if ((shadow_index < 0) || (shadow_index >= 4))
+    {
+        return 1.0;
+    }
+    float3 frag_to_light = world_pos - light_pos;
+    float closest_depth = point_shadow_cubemaps[shadow_index].sample(point_shadow_cubemapsSmplr[shadow_index], frag_to_light).x;
+    float current_depth = length(frag_to_light);
+    float bias0 = shadow_ubo.shadow_params.x * 0.5;
+    float far = light_range;
+    float depth = closest_depth * far;
+    float shadow = float((current_depth - bias0) > depth);
+    return 1.0 - shadow;
+}
+
+static inline __attribute__((always_inline))
+float3 fresnelSchlickRoughness(thread const float& cosTheta, thread const float3& F0, thread const float& roughness)
+{
+    return F0 + ((fast::max(float3(1.0 - roughness), F0) - F0) * powr(fast::clamp(1.0 - cosTheta, 0.0, 1.0), 5.0));
+}
+
+static inline __attribute__((always_inline))
+float3 calculateIBL(thread const float3& N, thread const float3& V, thread const float3& albedo, thread const float& metallic, thread const float& roughness, thread const float3& F0, thread const float& ao, texture2d<float> irradiance_map, sampler irradiance_mapSmplr, texture2d<float> prefiltered_map, sampler prefiltered_mapSmplr, texture2d<float> brdf_lut, sampler brdf_lutSmplr)
+{
+    float NdotV = fast::max(dot(N, V), 0.0);
+    float param = NdotV;
+    float3 param_1 = F0;
+    float param_2 = roughness;
+    float3 F = fresnelSchlickRoughness(param, param_1, param_2);
+    float3 kS = F;
+    float3 kD = float3(1.0) - kS;
+    kD *= (1.0 - metallic);
+    float3 irradiance = irradiance_map.sample(irradiance_mapSmplr, float2(0.5)).xyz;
+    float3 diffuse = irradiance * albedo;
+    float3 prefilteredColor = prefiltered_map.sample(prefiltered_mapSmplr, float2(0.5)).xyz;
+    float2 envBRDF = brdf_lut.sample(brdf_lutSmplr, float2(NdotV, roughness)).xy;
+    float3 specular = prefilteredColor * ((F * envBRDF.x) + float3(envBRDF.y));
+    return ((kD * diffuse) + specular) * ao;
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant ShadowUBO& shadow_ubo [[buffer(0)]], constant GlobalUBO& ubo [[buffer(1)]], constant PushConstants& push [[buffer(2)]], texture2d<float> normal_sampler [[texture(0)]], texture2d<float> irradiance_map [[texture(1)]], texture2d<float> prefiltered_map [[texture(2)]], texture2d<float> brdf_lut [[texture(3)]], array<texture2d<float>, 4> cascade_shadow_maps [[texture(4)]], array<texturecube<float>, 4> point_shadow_cubemaps [[texture(8)]], texture2d<float> albedo_sampler [[texture(12)]], texture2d<float> metallic_roughness_sampler [[texture(13)]], texture2d<float> ao_sampler [[texture(14)]], texture2d<float> emissive_sampler [[texture(15)]], sampler normal_samplerSmplr [[sampler(0)]], sampler irradiance_mapSmplr [[sampler(1)]], sampler prefiltered_mapSmplr [[sampler(2)]], sampler brdf_lutSmplr [[sampler(3)]], array<sampler, 4> cascade_shadow_mapsSmplr [[sampler(4)]], array<sampler, 4> point_shadow_cubemapsSmplr [[sampler(8)]], sampler albedo_samplerSmplr [[sampler(12)]], sampler metallic_roughness_samplerSmplr [[sampler(13)]], sampler ao_samplerSmplr [[sampler(14)]], sampler emissive_samplerSmplr [[sampler(15)]])
 {
     main0_out out = {};
     float3 albedo = albedo_sampler.sample(albedo_samplerSmplr, in.frag_texcoord).xyz;
-    albedo = powr(albedo, float3(2.2000000476837158203125));
     albedo *= (push.tint_color.xyz * in.frag_color.xyz);
     float2 metallic_roughness = metallic_roughness_sampler.sample(metallic_roughness_samplerSmplr, in.frag_texcoord).yz;
     float roughness = fast::clamp(metallic_roughness.x * push.material_params.x, 0.039999999105930328369140625, 1.0);
@@ -153,16 +295,20 @@ fragment main0_out main0(main0_in in [[stage_in]], constant PushConstants& push 
         float3 L = fast::normalize(-float3(ubo.dir_light_direction));
         float3 H = fast::normalize(V + L);
         float3 radiance = float3(ubo.dir_light_color) * ubo.dir_light_intensity;
-        float3 param_4 = N;
-        float3 param_5 = V;
+        float3 param_4 = in.frag_pos;
+        float3 param_5 = N;
         float3 param_6 = L;
-        float3 param_7 = H;
-        float3 param_8 = albedo;
-        float param_9 = metallic;
-        float param_10 = roughness;
-        float3 param_11 = F0;
-        float3 param_12 = radiance;
-        Lo += calculatePBR(param_4, param_5, param_6, param_7, param_8, param_9, param_10, param_11, param_12);
+        float shadow = sampleDirectionalShadow(param_4, param_5, param_6, shadow_ubo, ubo, cascade_shadow_maps, cascade_shadow_mapsSmplr);
+        float3 param_7 = N;
+        float3 param_8 = V;
+        float3 param_9 = L;
+        float3 param_10 = H;
+        float3 param_11 = albedo;
+        float param_12 = metallic;
+        float param_13 = roughness;
+        float3 param_14 = F0;
+        float3 param_15 = radiance;
+        Lo += (calculatePBR(param_7, param_8, param_9, param_10, param_11, param_12, param_13, param_14, param_15) * shadow);
     }
     for (uint i = 0u; (i < ubo.point_light_count) && (i < 8u); i++)
     {
@@ -180,21 +326,32 @@ fragment main0_out main0(main0_in in [[stage_in]], constant PushConstants& push 
             float attenuation = 1.0 / (_distance * _distance);
             attenuation *= smoothstep(light_range, light_range * 0.5, _distance);
             float3 radiance_1 = (light_color * light_intensity) * attenuation;
-            float3 param_13 = N;
-            float3 param_14 = V;
-            float3 param_15 = L_1;
-            float3 param_16 = H_1;
-            float3 param_17 = albedo;
-            float param_18 = metallic;
-            float param_19 = roughness;
-            float3 param_20 = F0;
-            float3 param_21 = radiance_1;
-            Lo += calculatePBR(param_13, param_14, param_15, param_16, param_17, param_18, param_19, param_20, param_21);
+            float3 param_16 = in.frag_pos;
+            uint param_17 = i;
+            float3 param_18 = light_pos;
+            float param_19 = light_range;
+            float shadow_1 = samplePointShadow(param_16, param_17, param_18, param_19, shadow_ubo, point_shadow_cubemaps, point_shadow_cubemapsSmplr);
+            float3 param_20 = N;
+            float3 param_21 = V;
+            float3 param_22 = L_1;
+            float3 param_23 = H_1;
+            float3 param_24 = albedo;
+            float param_25 = metallic;
+            float param_26 = roughness;
+            float3 param_27 = F0;
+            float3 param_28 = radiance_1;
+            Lo += (calculatePBR(param_20, param_21, param_22, param_23, param_24, param_25, param_26, param_27, param_28) * shadow_1);
         }
     }
-    float3 ambient = ((ubo.ambient_color.xyz * ubo.ambient_color.w) * albedo) * ao;
+    float3 param_29 = N;
+    float3 param_30 = V;
+    float3 param_31 = albedo;
+    float param_32 = metallic;
+    float param_33 = roughness;
+    float3 param_34 = F0;
+    float param_35 = ao;
+    float3 ambient = calculateIBL(param_29, param_30, param_31, param_32, param_33, param_34, param_35, irradiance_map, irradiance_mapSmplr, prefiltered_map, prefiltered_mapSmplr, brdf_lut, brdf_lutSmplr);
     float3 color = (ambient + Lo) + emissive;
-    color = powr(color, float3(0.4545454680919647216796875));
     float alpha = (albedo_sampler.sample(albedo_samplerSmplr, in.frag_texcoord).w * in.frag_color.w) * push.tint_color.w;
     out.out_color = float4(color, alpha);
     return out;

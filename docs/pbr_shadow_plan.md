@@ -22,7 +22,7 @@ This plan outlines a phased implementation of Physically Based Rendering (PBR) w
 
 ## Implementation Phases
 
-### Phase 1: PBR Shader Foundation (Weeks 1-2)
+### Phase 1: PBR Shader Foundation (Weeks 1-2) ✅ Completed
 
 **Goal:** Replace Blinn-Phong with Cook-Torrance BRDF and add normal mapping
 
@@ -112,7 +112,7 @@ This plan outlines a phased implementation of Physically Based Rendering (PBR) w
 
 ---
 
-### Phase 2: Image-Based Lighting (Week 3)
+### Phase 2: Image-Based Lighting (Week 3) ✅ Completed
 
 **Goal:** Add environment-based ambient lighting and reflections
 
@@ -157,7 +157,7 @@ This plan outlines a phased implementation of Physically Based Rendering (PBR) w
 
 ---
 
-### Phase 3: Cascade Shadow Maps for Directional Lights (Weeks 4-5)
+### Phase 3: Cascade Shadow Maps for Directional Lights (Weeks 4-5) ✅ Completed
 
 **Goal:** Add high-quality shadow mapping for the main directional light
 
@@ -239,7 +239,7 @@ This plan outlines a phased implementation of Physically Based Rendering (PBR) w
 
 ---
 
-### Phase 4: Point Light Shadow Maps (Week 6)
+### Phase 4: Point Light Shadow Maps (Week 6) ✅ Completed
 
 **Goal:** Add omnidirectional shadows for point lights
 
@@ -273,7 +273,7 @@ This plan outlines a phased implementation of Physically Based Rendering (PBR) w
 
 ---
 
-### Phase 5: HDR Pipeline and Tone Mapping (Week 7)
+### Phase 5: HDR Pipeline and Tone Mapping (Week 7) ✅ Completed
 
 **Goal:** Enable high dynamic range rendering with tone mapping post-process
 

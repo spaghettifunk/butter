@@ -13,6 +13,7 @@ const shader = @import("shader.zig");
 const pipeline = @import("pipeline.zig");
 const buffer = @import("buffer.zig");
 const texture = @import("texture.zig");
+const image = @import("image.zig");
 const descriptor = @import("descriptor.zig");
 const logger = @import("../../core/logging.zig");
 const engine_context = @import("../../context.zig");
@@ -45,6 +46,7 @@ pub const VulkanBackend = struct {
     // ImGui state
     imgui_initialized: bool = false,
     imgui_descriptor_pool: vk.VkDescriptorPool = null,
+    pending_imgui_draw_data: ?*anyopaque = null, // Deferred ImGui rendering
 
     pub fn initialize(self: *VulkanBackend, application_name: []const u8) bool {
         // TODO: custom allocator
@@ -184,13 +186,13 @@ pub const VulkanBackend = struct {
             return false;
         }
 
-        // Create framebuffers (after renderpass is created)
+        // Create swapchain framebuffers
         if (!swapchain.createFramebuffers(
             &self.context,
             &self.context.swapchain,
             self.context.main_renderpass.handle,
         )) {
-            logger.err("Failed to create framebuffers.", .{});
+            logger.err("Failed to create swapchain framebuffers.", .{});
             return false;
         }
 
@@ -260,6 +262,38 @@ pub const VulkanBackend = struct {
             return false;
         }
 
+        // Create shadow descriptor layout (Set 2: shadow maps)
+        if (!descriptor.createShadowLayout(&self.context, &self.context.shadow_descriptor_state)) {
+            logger.err("Failed to create shadow descriptor layout.", .{});
+            return false;
+        }
+
+        // Create shadow descriptor pool
+        if (!descriptor.createShadowPool(
+            &self.context,
+            &self.context.shadow_descriptor_state,
+            self.context.swapchain.max_frames_in_flight,
+        )) {
+            logger.err("Failed to create shadow descriptor pool.", .{});
+            return false;
+        }
+
+        // Allocate shadow descriptor sets
+        if (!descriptor.allocateShadowSets(
+            &self.context,
+            &self.context.shadow_descriptor_state,
+            self.context.swapchain.max_frames_in_flight,
+        )) {
+            logger.err("Failed to allocate shadow descriptor sets.", .{});
+            return false;
+        }
+
+        // Initialize shadow system (create shadow maps, render pass, etc.)
+        if (!self.initializeShadowSystem()) {
+            logger.err("Failed to initialize shadow system.", .{});
+            return false;
+        }
+
         // Update descriptor sets with uniform buffer bindings
         self.updateDescriptorSets();
 
@@ -269,15 +303,27 @@ pub const VulkanBackend = struct {
             return false;
         }
 
-        // Create graphics pipeline with two-tier descriptor layout
-        if (!pipeline.createMaterialPipelineWithLayouts(
+        // Create graphics pipeline with three-tier descriptor layout (Set 0: UBO, Set 1: Material, Set 2: Shadow)
+        if (!pipeline.createMaterialPipelineWithShadow(
             &self.context,
             &self.context.material_shader,
             self.context.global_descriptor_state.global_layout,
             self.context.material_descriptor_state.material_layout,
+            self.context.shadow_descriptor_state.layout,
             self.context.main_renderpass.handle,
         )) {
             logger.err("Failed to create object shader pipeline.", .{});
+            return false;
+        }
+
+        // Create shadow pipeline for shadow map rendering
+        if (!pipeline.createShadowPipeline(
+            &self.context,
+            &self.context.shadow_pipeline,
+            self.context.global_descriptor_state.global_layout,
+            self.context.shadow_renderpass.handle,
+        )) {
+            logger.err("Failed to create shadow pipeline.", .{});
             return false;
         }
 
@@ -313,6 +359,12 @@ pub const VulkanBackend = struct {
             self.cleanupGrid();
         }
 
+        // Cleanup shadow system
+        self.cleanupShadowSystem();
+
+        // Destroy shadow pipeline
+        pipeline.destroyShadowPipeline(&self.context, &self.context.shadow_pipeline);
+
         // Destroy graphics pipeline
         pipeline.destroyMaterialPipeline(&self.context, &self.context.material_shader);
 
@@ -323,10 +375,12 @@ pub const VulkanBackend = struct {
         // Destroy descriptor pools (also frees descriptor sets)
         descriptor.destroyGlobalPool(&self.context, &self.context.global_descriptor_state);
         descriptor.destroyMaterialPool(&self.context, &self.context.material_descriptor_state);
+        descriptor.destroyShadowPool(&self.context, &self.context.shadow_descriptor_state);
 
         // Destroy descriptor set layouts
         descriptor.destroyGlobalLayout(&self.context, &self.context.global_descriptor_state);
         descriptor.destroyMaterialLayout(&self.context, &self.context.material_descriptor_state);
+        descriptor.destroyShadowLayout(&self.context, &self.context.shadow_descriptor_state);
 
         // Destroy global uniform buffers
         self.destroyGlobalUniformBuffers();
@@ -476,7 +530,16 @@ pub const VulkanBackend = struct {
             return false;
         }
 
-        // Set up dynamic viewport and scissor
+        // Begin the main renderpass
+        renderpass.begin(
+            &self.context.main_renderpass,
+            cmd_buffer.handle,
+            self.context.swapchain.framebuffers[image_index],
+        );
+
+        // Set up dynamic viewport and scissor AFTER beginning renderpass
+        // Dynamic state must be set inside the renderpass
+        // Use flipped viewport (negative height) for correct orientation with flipped clip space
         var viewport: vk.VkViewport = .{
             .x = 0.0,
             .y = @as(f32, @floatFromInt(self.context.framebuffer_height)),
@@ -496,13 +559,6 @@ pub const VulkanBackend = struct {
         };
         vk.vkCmdSetScissor(cmd_buffer.handle, 0, 1, &scissor);
 
-        // Begin the main renderpass - this transitions the image layout
-        renderpass.begin(
-            &self.context.main_renderpass,
-            cmd_buffer.handle,
-            self.context.swapchain.framebuffers[image_index],
-        );
-
         // Mark frame as in progress (for texture binding safety)
         self.context.frame_in_progress = true;
 
@@ -520,7 +576,10 @@ pub const VulkanBackend = struct {
         // Grid is now rendered via render graph (see renderGridPass callback)
         // Removed duplicate renderGridDirect call that was causing double rendering
 
-        // End the renderpass - this transitions the image to PRESENT_SRC layout
+        // Render ImGui UI
+        self.renderImGuiInternal();
+
+        // End the main renderpass
         renderpass.end(&self.context.main_renderpass, cmd_buffer.handle);
 
         // End the command buffer
@@ -586,6 +645,229 @@ pub const VulkanBackend = struct {
         self.context.frame_in_progress = false;
 
         return true;
+    }
+
+    /// Update shadow UBO with cascade matrices based on camera and directional light
+    pub fn updateShadowUBO(
+        self: *VulkanBackend,
+        view_matrix: *const math_types.Mat4,
+        _: *const math_types.Mat4,
+        light_direction: *const [3]f32,
+        near_plane: f32,
+        far_plane: f32,
+    ) void {
+        const current_frame = self.context.current_frame;
+
+        // Calculate cascade split distances using logarithmic scheme
+        const near = near_plane;
+        const far = far_plane;
+        const lambda: f32 = 0.95; // Logarithmic split weight
+
+        var cascade_splits: [4]f32 = undefined;
+        for (0..4) |i| {
+            const p = @as(f32, @floatFromInt(i + 1)) / 4.0;
+            const log = near * std.math.pow(f32, far / near, p);
+            const uniform = near + (far - near) * p;
+            cascade_splits[i] = lambda * log + (1.0 - lambda) * uniform;
+        }
+
+        // Calculate light view matrix (looking down the light direction)
+        const light_dir = math.vec3Normalize(.{
+            .x = light_direction[0],
+            .y = light_direction[1],
+            .z = light_direction[2],
+        });
+
+        // Calculate up vector (perpendicular to light direction)
+        const world_up = math.Vec3{ .x = 0, .y = 1, .z = 0 };
+        const up = if (@abs(light_dir.y) > 0.99)
+            math.Vec3{ .x = 1, .y = 0, .z = 0 }
+        else
+            world_up;
+
+        // Get camera position from view matrix (inverse translation)
+        const cam_pos = math.Vec3{
+            .x = view_matrix.elements[3][0],
+            .y = view_matrix.elements[3][1],
+            .z = view_matrix.elements[3][2],
+        };
+
+        // Build cascade view-projection matrices
+        var shadow_ubo = renderer.ShadowUBO{
+            .cascade_view_proj = undefined,
+            .cascade_splits = cascade_splits,
+        };
+
+        var last_split: f32 = near;
+        for (0..4) |cascade_index| {
+            const split_dist = cascade_splits[cascade_index];
+
+            // Calculate frustum corners for this cascade
+            // For simplicity, use a fixed orthographic projection size based on cascade distance
+            const cascade_size = split_dist * 2.0;
+
+            // Light view matrix: look from camera position along light direction
+            const light_pos = math.vec3Sub(cam_pos, math.vec3Scale(light_dir, cascade_size));
+            const light_view = math.mat4LookAt(light_pos, cam_pos, up);
+
+            // Orthographic projection for cascade
+            const half_size = cascade_size * 0.5;
+            const light_proj = math.mat4Ortho(
+                -half_size, half_size,  // left, right
+                -half_size, half_size,  // bottom, top
+                -cascade_size, cascade_size, // near, far
+            );
+
+            // Combine view and projection
+            shadow_ubo.cascade_view_proj[cascade_index] = math.mat4Mul(light_proj, light_view);
+
+            last_split = split_dist;
+        }
+
+        // Upload to GPU buffer
+        buffer.loadData(
+            &self.context,
+            &self.context.shadow_uniform_buffers[current_frame],
+            0,
+            @sizeOf(renderer.ShadowUBO),
+            @ptrCast(&shadow_ubo),
+        );
+    }
+
+    /// Begin shadow rendering pass - renders all cascades
+    /// Call this BEFORE beginFrame, and use drawMeshToShadowMap to render meshes
+    pub fn beginShadowPass(self: *VulkanBackend) bool {
+        // Shadow rendering will be done in beginFrame before the main pass
+        // This is a placeholder for future enhancements
+        _ = self;
+        return true;
+    }
+
+    /// Draw a mesh to all shadow cascade maps
+    pub fn drawMeshToShadowMaps(
+        self: *VulkanBackend,
+        mesh: *const @import("../../resources/mesh_asset_types.zig").MeshAsset,
+        model_matrix: *const math_types.Mat4,
+    ) void {
+        const image_index = self.context.image_index;
+        const cmd_buffer = &self.context.graphics_command_buffers[image_index];
+
+        // Render to each cascade
+        for (0..4) |cascade_index| {
+            // Begin shadow renderpass for this cascade
+            var clear_value: vk.VkClearValue = undefined;
+            clear_value.depthStencil = .{
+                .depth = 1.0,
+                .stencil = 0,
+            };
+
+            var begin_info: vk.VkRenderPassBeginInfo = .{
+                .sType = vk.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                .pNext = null,
+                .renderPass = self.context.shadow_renderpass.handle,
+                .framebuffer = self.context.cascade_shadow_framebuffers[cascade_index],
+                .renderArea = .{
+                    .offset = .{ .x = 0, .y = 0 },
+                    .extent = .{ .width = 2048, .height = 2048 },
+                },
+                .clearValueCount = 1,
+                .pClearValues = &clear_value,
+            };
+
+            vk.vkCmdBeginRenderPass(cmd_buffer.handle, &begin_info, vk.VK_SUBPASS_CONTENTS_INLINE);
+
+            // Set viewport and scissor for shadow map resolution
+            var viewport: vk.VkViewport = .{
+                .x = 0.0,
+                .y = 2048.0,
+                .width = 2048.0,
+                .height = -2048.0,
+                .minDepth = 0.0,
+                .maxDepth = 1.0,
+            };
+            vk.vkCmdSetViewport(cmd_buffer.handle, 0, 1, &viewport);
+
+            var scissor: vk.VkRect2D = .{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = .{ .width = 2048, .height = 2048 },
+            };
+            vk.vkCmdSetScissor(cmd_buffer.handle, 0, 1, &scissor);
+
+            // Set depth bias to prevent shadow acne
+            const depth_bias: f32 = 0.005;
+            const slope_bias: f32 = 0.01;
+            vk.vkCmdSetDepthBias(cmd_buffer.handle, depth_bias, 0.0, slope_bias);
+
+            // Bind shadow pipeline
+            vk.vkCmdBindPipeline(
+                cmd_buffer.handle,
+                vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                self.context.shadow_pipeline.pipeline.handle,
+            );
+
+            // Bind global descriptor set (contains ShadowUBO)
+            vk.vkCmdBindDescriptorSets(
+                cmd_buffer.handle,
+                vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                self.context.shadow_pipeline.pipeline.layout,
+                0, // Set 0
+                1,
+                &self.context.global_descriptor_state.global_sets[image_index],
+                0,
+                null,
+            );
+
+            // Push constants: model matrix and cascade index
+            var push_constants = pipeline.ShadowPushConstants{
+                .model = model_matrix.*,
+                .cascade_index = @intCast(cascade_index),
+            };
+
+            vk.vkCmdPushConstants(
+                cmd_buffer.handle,
+                self.context.shadow_pipeline.pipeline.layout,
+                vk.VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                @sizeOf(pipeline.ShadowPushConstants),
+                @ptrCast(&push_constants),
+            );
+
+            // Bind vertex and index buffers
+            const offsets = [_]vk.VkDeviceSize{0};
+            vk.vkCmdBindVertexBuffers(
+                cmd_buffer.handle,
+                0,
+                1,
+                &mesh.vertex_buffer.?.handle,
+                &offsets,
+            );
+
+            vk.vkCmdBindIndexBuffer(
+                cmd_buffer.handle,
+                mesh.index_buffer.?.handle,
+                0,
+                vk.VK_INDEX_TYPE_UINT32,
+            );
+
+            // Draw indexed
+            vk.vkCmdDrawIndexed(
+                cmd_buffer.handle,
+                mesh.index_count,
+                1, // instance count
+                0, // first index
+                0, // vertex offset
+                0, // first instance
+            );
+
+            // End renderpass
+            vk.vkCmdEndRenderPass(cmd_buffer.handle);
+        }
+    }
+
+    /// End shadow rendering pass
+    pub fn endShadowPass(self: *VulkanBackend) void {
+        // Shadow pass cleanup if needed
+        _ = self;
     }
 
     /// Create a texture from raw pixel data
@@ -667,7 +949,7 @@ pub const VulkanBackend = struct {
         }
     }
 
-    /// Allocate a material descriptor set and populate it with textures
+    /// Allocate a material descriptor set and populate it with textures (legacy)
     /// Returns null on failure (pool exhaustion, invalid textures, etc.)
     pub fn allocateMaterialDescriptorSet(
         self: *VulkanBackend,
@@ -689,6 +971,45 @@ pub const VulkanBackend = struct {
             descriptor_set,
             diffuse_texture,
             specular_texture,
+        );
+
+        return descriptor_set;
+    }
+
+    /// Allocate a material descriptor set with all 8 PBR textures including IBL
+    /// Returns null on failure (pool exhaustion, invalid textures, etc.)
+    pub fn allocateMaterialDescriptorSetPBR(
+        self: *VulkanBackend,
+        albedo_texture: *const resource_types.Texture,
+        metallic_roughness_texture: *const resource_types.Texture,
+        normal_texture: *const resource_types.Texture,
+        ao_texture: *const resource_types.Texture,
+        emissive_texture: *const resource_types.Texture,
+        irradiance_texture: *const resource_types.Texture,
+        prefiltered_texture: *const resource_types.Texture,
+        brdf_lut_texture: *const resource_types.Texture,
+    ) ?vk.VkDescriptorSet {
+        // Allocate a descriptor set from the material pool
+        const descriptor_set = descriptor.allocateMaterialSet(
+            &self.context,
+            &self.context.material_descriptor_state,
+        ) orelse {
+            logger.warn("Failed to allocate PBR material descriptor set (pool may be exhausted)", .{});
+            return null;
+        };
+
+        // Update the descriptor set with all 8 PBR textures
+        descriptor.updateMaterialSetPBR(
+            &self.context,
+            descriptor_set,
+            albedo_texture,
+            metallic_roughness_texture,
+            normal_texture,
+            ao_texture,
+            emissive_texture,
+            irradiance_texture,
+            prefiltered_texture,
+            brdf_lut_texture,
         );
 
         return descriptor_set;
@@ -718,17 +1039,18 @@ pub const VulkanBackend = struct {
         // Bind the graphics pipeline
         pipeline.bindPipeline(cmd, &self.context.material_shader.pipeline);
 
-        // Bind both global (Set 0) and material (Set 1) descriptor sets
+        // Bind all descriptor sets (Set 0: Global UBO, Set 1: Material, Set 2: Shadow)
         const descriptor_sets = [_]vk.VkDescriptorSet{
             self.context.global_descriptor_state.global_sets[current_frame], // Set 0: Global UBO
             self.context.default_material_descriptor_set, // Set 1: Material textures (default)
+            self.context.shadow_descriptor_state.sets[current_frame], // Set 2: Shadow maps
         };
         vk.vkCmdBindDescriptorSets(
             cmd,
             vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
             self.context.material_shader.pipeline.layout,
             0,
-            2, // Bind 2 descriptor sets
+            3, // Bind 3 descriptor sets
             &descriptor_sets,
             0,
             null,
@@ -807,17 +1129,18 @@ pub const VulkanBackend = struct {
         else
             self.context.default_material_descriptor_set;
 
-        // Bind both global (Set 0) and material (Set 1) descriptor sets
+        // Bind all descriptor sets (Set 0: Global UBO, Set 1: Material, Set 2: Shadow)
         const descriptor_sets = [_]vk.VkDescriptorSet{
             self.context.global_descriptor_state.global_sets[current_frame], // Set 0: Global UBO
             material_descriptor_set, // Set 1: Material textures
+            self.context.shadow_descriptor_state.sets[current_frame], // Set 2: Shadow maps
         };
         vk.vkCmdBindDescriptorSets(
             cmd,
             vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
             self.context.material_shader.pipeline.layout,
             0,
-            2, // Bind 2 descriptor sets
+            3, // Bind 3 descriptor sets
             &descriptor_sets,
             0,
             null,
@@ -1372,19 +1695,34 @@ pub const VulkanBackend = struct {
         imgui_vulkan.cImGui_ImplVulkan_NewFrame();
     }
 
-    /// Render ImGui draw data
+    /// Store ImGui draw data for deferred rendering during tonemap pass
+    /// This is called during the HDR pass, but actual rendering happens in endFrame during tonemap pass
     pub fn renderImGui(self: *VulkanBackend, draw_data: ?*anyopaque) void {
         if (!build_options.enable_imgui) return;
         if (!self.imgui_initialized) return;
         if (draw_data == null) return;
+
+        // Store the draw data pointer for rendering during the tonemap pass
+        // The draw data remains valid until the next ImGui frame begins
+        self.pending_imgui_draw_data = draw_data;
+    }
+
+    /// Internal function to actually render ImGui during the tonemap pass
+    fn renderImGuiInternal(self: *VulkanBackend) void {
+        if (!build_options.enable_imgui) return;
+        if (!self.imgui_initialized) return;
+        if (self.pending_imgui_draw_data == null) return;
 
         // Get current command buffer
         const cmd_buf = self.context.graphics_command_buffers[self.context.image_index].handle;
         if (cmd_buf == null) return;
 
         // Cast draw_data with proper alignment and command buffer to imgui's type
-        const imgui_draw_data: *imgui_vulkan.ImDrawData = @ptrCast(@alignCast(draw_data));
+        const imgui_draw_data: *imgui_vulkan.ImDrawData = @ptrCast(@alignCast(self.pending_imgui_draw_data));
         imgui_vulkan.cImGui_ImplVulkan_RenderDrawData(imgui_draw_data, @ptrCast(cmd_buf));
+
+        // Clear the pending draw data
+        self.pending_imgui_draw_data = null;
     }
 
     // =========================================================================
@@ -1567,6 +1905,470 @@ pub const VulkanBackend = struct {
         for (0..frame_count) |i| {
             buffer.destroy(&self.context, &self.context.grid_camera_buffers[i]);
             buffer.destroy(&self.context, &self.context.grid_ubo_buffers[i]);
+        }
+    }
+
+    // =========================================================================
+    // Shadow System
+    // =========================================================================
+
+    /// Initialize shadow mapping system
+    fn initializeShadowSystem(self: *VulkanBackend) bool {
+        const shadow_res: u32 = 2048; // CASCADE_RESOLUTION from shadow_system.zig
+
+        // Create shadow renderpass
+        if (!renderpass.createShadowRenderpass(
+            &self.context,
+            &self.context.shadow_renderpass,
+            shadow_res,
+            shadow_res,
+        )) {
+            logger.err("Failed to create shadow renderpass.", .{});
+            return false;
+        }
+
+        // Create shadow sampler (depth comparison sampler)
+        if (!self.createShadowSampler()) {
+            logger.err("Failed to create shadow sampler.", .{});
+            return false;
+        }
+
+        // Create cascade shadow map images and framebuffers
+        for (0..4) |i| {
+            if (!self.createCascadeShadowMap(i, shadow_res)) {
+                logger.err("Failed to create cascade shadow map {}.", .{i});
+                return false;
+            }
+        }
+
+        // Create shadow UBO buffers (one per frame in flight)
+        const frame_count = self.context.swapchain.max_frames_in_flight;
+        for (0..frame_count) |i| {
+            if (!buffer.create(
+                &self.context,
+                &self.context.shadow_uniform_buffers[i],
+                @sizeOf(renderer.ShadowUBO),
+                vk.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            )) {
+                logger.err("Failed to create shadow uniform buffer {}.", .{i});
+                return false;
+            }
+        }
+
+        // Create default cubemap for point shadow placeholders
+        if (!self.createDefaultCubemap()) {
+            logger.err("Failed to create default cubemap.", .{});
+            return false;
+        }
+
+        // Update shadow descriptor sets with shadow UBO and default cubemaps
+        self.updateShadowDescriptorSets();
+
+        logger.info("Shadow system initialized successfully.", .{});
+        return true;
+    }
+
+    /// Cleanup shadow system resources
+    fn cleanupShadowSystem(self: *VulkanBackend) void {
+        // Destroy shadow UBO buffers
+        const frame_count = self.context.swapchain.max_frames_in_flight;
+        for (0..frame_count) |i| {
+            buffer.destroy(&self.context, &self.context.shadow_uniform_buffers[i]);
+        }
+
+        // Destroy cascade shadow maps
+        for (0..4) |i| {
+            if (self.context.cascade_shadow_framebuffers[i] != null) {
+                vk.vkDestroyFramebuffer(
+                    self.context.device,
+                    self.context.cascade_shadow_framebuffers[i],
+                    self.context.allocator,
+                );
+            }
+            // Note: ImageView is destroyed automatically by image.destroy()
+            // Don't destroy it explicitly to avoid double-free
+            image.destroy(&self.context, &self.context.cascade_shadow_images[i]);
+        }
+
+        // Destroy shadow sampler
+        if (self.context.shadow_sampler != null) {
+            vk.vkDestroySampler(
+                self.context.device,
+                self.context.shadow_sampler,
+                self.context.allocator,
+            );
+        }
+
+        // Destroy default cubemap (image.destroy will handle the view)
+        image.destroy(&self.context, &self.context.default_cubemap_image);
+        self.context.default_cubemap_view = null;
+
+        // Destroy shadow renderpass
+        renderpass.destroy(&self.context, &self.context.shadow_renderpass);
+    }
+
+    /// Create shadow sampler with depth comparison
+    fn createShadowSampler(self: *VulkanBackend) bool {
+        // MoltenVK doesn't support mutable comparison samplers, so we disable comparison
+        // and do manual depth comparison in the shader
+        var sampler_info: vk.VkSamplerCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .magFilter = vk.VK_FILTER_LINEAR,
+            .minFilter = vk.VK_FILTER_LINEAR,
+            .mipmapMode = vk.VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .addressModeU = vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .addressModeV = vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .addressModeW = vk.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .mipLodBias = 0.0,
+            .anisotropyEnable = vk.VK_FALSE,
+            .maxAnisotropy = 1.0,
+            .compareEnable = vk.VK_FALSE, // Disabled for MoltenVK portability
+            .compareOp = vk.VK_COMPARE_OP_LESS_OR_EQUAL,
+            .minLod = 0.0,
+            .maxLod = 1.0,
+            .borderColor = vk.VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE, // Depth 1.0 (no shadow)
+            .unnormalizedCoordinates = vk.VK_FALSE,
+        };
+
+        const result = vk.vkCreateSampler(
+            self.context.device,
+            &sampler_info,
+            self.context.allocator,
+            &self.context.shadow_sampler,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkCreateSampler (shadow) failed: {}", .{result});
+            return false;
+        }
+
+        return true;
+    }
+
+    /// Create a default cubemap for point shadow placeholders (1x1 depth cubemap)
+    fn createDefaultCubemap(self: *VulkanBackend) bool {
+        const size: u32 = 1;
+
+        // Create cubemap image (6 layers)
+        var image_info: vk.VkImageCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = null,
+            .flags = vk.VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+            .imageType = vk.VK_IMAGE_TYPE_2D,
+            .format = vk.VK_FORMAT_D32_SFLOAT,
+            .extent = .{
+                .width = size,
+                .height = size,
+                .depth = 1,
+            },
+            .mipLevels = 1,
+            .arrayLayers = 6, // Cubemap has 6 faces
+            .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+            .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+            .usage = vk.VK_IMAGE_USAGE_SAMPLED_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = null,
+            .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        var result = vk.vkCreateImage(
+            self.context.device,
+            &image_info,
+            self.context.allocator,
+            &self.context.default_cubemap_image.handle,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkCreateImage (default cubemap) failed: {}", .{result});
+            return false;
+        }
+
+        // Allocate memory
+        var mem_requirements: vk.VkMemoryRequirements = undefined;
+        vk.vkGetImageMemoryRequirements(
+            self.context.device,
+            self.context.default_cubemap_image.handle,
+            &mem_requirements,
+        );
+
+        const memory_type_index = image.findMemoryType(
+            &self.context,
+            mem_requirements.memoryTypeBits,
+            vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        );
+
+        if (memory_type_index == null) {
+            logger.err("Failed to find suitable memory type for default cubemap", .{});
+            vk.vkDestroyImage(self.context.device, self.context.default_cubemap_image.handle, self.context.allocator);
+            return false;
+        }
+
+        var alloc_info: vk.VkMemoryAllocateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = null,
+            .allocationSize = mem_requirements.size,
+            .memoryTypeIndex = memory_type_index.?,
+        };
+
+        result = vk.vkAllocateMemory(
+            self.context.device,
+            &alloc_info,
+            self.context.allocator,
+            &self.context.default_cubemap_image.memory,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkAllocateMemory (default cubemap) failed: {}", .{result});
+            return false;
+        }
+
+        result = vk.vkBindImageMemory(
+            self.context.device,
+            self.context.default_cubemap_image.handle,
+            self.context.default_cubemap_image.memory,
+            0,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkBindImageMemory (default cubemap) failed: {}", .{result});
+            return false;
+        }
+
+        // Transition all 6 cubemap layers to shader read layout
+        var temp_cmd_buffer: command_buffer.VulkanCommandBuffer = .{};
+        if (!command_buffer.allocateAndBeginSingleUse(
+            &self.context,
+            self.context.graphics_command_pool,
+            &temp_cmd_buffer,
+        )) {
+            logger.err("Failed to allocate transition command buffer for default cubemap.", .{});
+            return false;
+        }
+
+        // Transition all 6 layers of the cubemap
+        var barrier: vk.VkImageMemoryBarrier = .{
+            .sType = vk.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = 0,
+            .dstAccessMask = vk.VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = vk.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = vk.VK_QUEUE_FAMILY_IGNORED,
+            .image = self.context.default_cubemap_image.handle,
+            .subresourceRange = .{
+                .aspectMask = vk.VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 6, // All 6 cubemap faces
+            },
+        };
+
+        vk.vkCmdPipelineBarrier(
+            temp_cmd_buffer.handle,
+            vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            vk.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &barrier,
+        );
+
+        if (!command_buffer.endSingleUse(
+            &self.context,
+            self.context.graphics_command_pool,
+            &temp_cmd_buffer,
+            self.context.graphics_queue,
+        )) {
+            logger.err("Failed to submit transition command buffer for default cubemap.", .{});
+            return false;
+        }
+
+        // Create cubemap view
+        var view_info: vk.VkImageViewCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .image = self.context.default_cubemap_image.handle,
+            .viewType = vk.VK_IMAGE_VIEW_TYPE_CUBE,
+            .format = vk.VK_FORMAT_D32_SFLOAT,
+            .components = .{
+                .r = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = .{
+                .aspectMask = vk.VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 6, // All 6 faces
+            },
+        };
+
+        result = vk.vkCreateImageView(
+            self.context.device,
+            &view_info,
+            self.context.allocator,
+            &self.context.default_cubemap_view,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkCreateImageView (default cubemap) failed: {}", .{result});
+            return false;
+        }
+
+        self.context.default_cubemap_image.view = self.context.default_cubemap_view;
+        logger.debug("Default cubemap created ({}x{} depth cubemap).", .{ size, size });
+        return true;
+    }
+
+    /// Create a single cascade shadow map (image + view + framebuffer)
+    fn createCascadeShadowMap(self: *VulkanBackend, cascade_index: usize, resolution: u32) bool {
+        // Create depth image
+        if (!image.create(
+            &self.context,
+            &self.context.cascade_shadow_images[cascade_index],
+            resolution,
+            resolution,
+            vk.VK_FORMAT_D32_SFLOAT,
+            vk.VK_IMAGE_TILING_OPTIMAL,
+            vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | vk.VK_IMAGE_USAGE_SAMPLED_BIT,
+            vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            vk.VK_IMAGE_ASPECT_DEPTH_BIT,
+        )) {
+            logger.err("Failed to create cascade {} shadow image.", .{cascade_index});
+            return false;
+        }
+
+        // Transition image layout to SHADER_READ_ONLY_OPTIMAL
+        // This is needed because we're creating the image in UNDEFINED layout
+        // but the descriptor set expects it to be in SHADER_READ_ONLY_OPTIMAL
+        var temp_cmd_buffer: command_buffer.VulkanCommandBuffer = .{};
+        if (!command_buffer.allocateAndBeginSingleUse(
+            &self.context,
+            self.context.graphics_command_pool,
+            &temp_cmd_buffer,
+        )) {
+            logger.err("Failed to allocate transition command buffer for cascade {}.", .{cascade_index});
+            return false;
+        }
+
+        image.transitionLayout(
+            &self.context,
+            temp_cmd_buffer.handle,
+            self.context.cascade_shadow_images[cascade_index].handle,
+            vk.VK_FORMAT_D32_SFLOAT,
+            vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        if (!command_buffer.endSingleUse(
+            &self.context,
+            self.context.graphics_command_pool,
+            &temp_cmd_buffer,
+            self.context.graphics_queue,
+        )) {
+            logger.err("Failed to submit transition command buffer for cascade {}.", .{cascade_index});
+            return false;
+        }
+
+        // Image view is created by image.create, so we just store a reference
+        self.context.cascade_shadow_views[cascade_index] = self.context.cascade_shadow_images[cascade_index].view;
+
+        // Create framebuffer
+        var attachments = [_]vk.VkImageView{self.context.cascade_shadow_views[cascade_index]};
+
+        var framebuffer_info: vk.VkFramebufferCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .renderPass = self.context.shadow_renderpass.handle,
+            .attachmentCount = attachments.len,
+            .pAttachments = &attachments,
+            .width = resolution,
+            .height = resolution,
+            .layers = 1,
+        };
+
+        const result = vk.vkCreateFramebuffer(
+            self.context.device,
+            &framebuffer_info,
+            self.context.allocator,
+            &self.context.cascade_shadow_framebuffers[cascade_index],
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkCreateFramebuffer (cascade {}) failed: {}", .{ cascade_index, result });
+            return false;
+        }
+
+        return true;
+    }
+
+    /// Update shadow descriptor sets with shadow map textures
+    fn updateShadowDescriptorSets(self: *VulkanBackend) void {
+        const frame_count = self.context.swapchain.max_frames_in_flight;
+
+        // Prepare cascade shadow map image infos
+        var cascade_image_infos: [4]vk.VkDescriptorImageInfo = undefined;
+        for (0..4) |i| {
+            cascade_image_infos[i] = .{
+                .sampler = self.context.shadow_sampler,
+                .imageView = self.context.cascade_shadow_views[i],
+                .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+        }
+
+        // Prepare point shadow cubemap image infos (using default cubemap as placeholder)
+        var point_image_infos: [4]vk.VkDescriptorImageInfo = undefined;
+        for (0..4) |i| {
+            point_image_infos[i] = .{
+                .sampler = self.context.shadow_sampler,
+                .imageView = self.context.default_cubemap_view,
+                .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+        }
+
+        // Update descriptor sets for each frame
+        for (0..frame_count) |i| {
+            descriptor.updateShadowDescriptorSet(
+                &self.context,
+                &self.context.shadow_descriptor_state,
+                @intCast(i),
+                &cascade_image_infos,
+            );
+
+            // Update point shadow cubemaps (default placeholders for now)
+            descriptor.updatePointShadowDescriptorSet(
+                &self.context,
+                &self.context.shadow_descriptor_state,
+                @intCast(i),
+                &point_image_infos,
+            );
+
+            // Update shadow UBO in global descriptor set (Set 0, Binding 1)
+            var shadow_buffer_info: vk.VkDescriptorBufferInfo = .{
+                .buffer = self.context.shadow_uniform_buffers[i].handle,
+                .offset = 0,
+                .range = @sizeOf(renderer.ShadowUBO),
+            };
+
+            descriptor.updateShadowSet(
+                &self.context,
+                &self.context.global_descriptor_state,
+                @intCast(i),
+                &shadow_buffer_info,
+            );
         }
     }
 

@@ -249,6 +249,16 @@ pub fn transitionLayout(
             vk.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         source_stage = vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         destination_stage = vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    } else if (old_layout == vk.VK_IMAGE_LAYOUT_UNDEFINED and
+        new_layout == vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    {
+        // Transition depth image directly to shader read optimal
+        // Used for shadow maps that are never written to via renderpass
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = vk.VK_ACCESS_SHADER_READ_BIT;
+        barrier.subresourceRange.aspectMask = vk.VK_IMAGE_ASPECT_DEPTH_BIT;
+        source_stage = vk.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destination_stage = vk.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     } else {
         logger.warn("Unsupported layout transition: {} -> {}", .{ old_layout, new_layout });
         return;
@@ -309,7 +319,7 @@ pub fn copyBufferToImage(
 // --- Private helper functions ---
 
 /// Find a suitable memory type for the given requirements
-fn findMemoryType(
+pub fn findMemoryType(
     context: *vk_context.VulkanContext,
     type_filter: u32,
     properties: vk.VkMemoryPropertyFlags,

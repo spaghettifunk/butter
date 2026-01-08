@@ -21,6 +21,7 @@ const mesh_asset = @import("systems/mesh_asset.zig");
 const renderer = @import("renderer/renderer.zig");
 const jobs = @import("systems/jobs.zig");
 const resource_manager = @import("resources/manager.zig");
+const environment = @import("systems/environment.zig");
 
 const render_graph = @import("renderer/render_graph/mod.zig");
 
@@ -39,6 +40,7 @@ pub const EngineContext = extern struct {
     material: ?*material.MaterialSystem,
     mesh_asset: ?*mesh_asset.MeshAssetSystem,
     renderer: ?*renderer.RendererSystem,
+    environment: ?*environment.EnvironmentSystem,
 
     render_graph: ?*render_graph.RenderGraph,
 
@@ -62,6 +64,7 @@ var contextStorage: EngineContext = .{
     .material = null,
     .mesh_asset = null,
     .renderer = null,
+    .environment = null,
 
     .render_graph = null,
 
