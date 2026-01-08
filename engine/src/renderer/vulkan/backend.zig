@@ -2270,6 +2270,7 @@ pub const VulkanBackend = struct {
             vk.VK_FORMAT_D32_SFLOAT,
             vk.VK_IMAGE_LAYOUT_UNDEFINED,
             vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            1,
         );
 
         if (!command_buffer.endSingleUse(

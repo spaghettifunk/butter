@@ -375,6 +375,8 @@ fn createImageViews(context: *vk_context.VulkanContext, swapchain: *VulkanSwapch
             image,
             swapchain.image_format.format,
             vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            vk.VK_IMAGE_VIEW_TYPE_2D,
+            1,
         );
 
         if (view == null) {

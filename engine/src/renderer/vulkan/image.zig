@@ -108,7 +108,7 @@ pub fn create(
     }
 
     // Create image view
-    image.view = createImageView(context, image.handle, format, aspect_flags);
+    image.view = createImageView(context, image.handle, format, aspect_flags, vk.VK_IMAGE_VIEW_TYPE_2D, 1);
     if (image.view == null) {
         logger.err("Failed to create image view", .{});
         vk.vkFreeMemory(context.device, image.memory, context.allocator);
@@ -151,13 +151,15 @@ pub fn createImageView(
     image: vk.VkImage,
     format: vk.VkFormat,
     aspect_flags: vk.VkImageAspectFlags,
+    view_type: vk.VkImageViewType,
+    layer_count: u32,
 ) vk.VkImageView {
     var view_info: vk.VkImageViewCreateInfo = .{
         .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .pNext = null,
         .flags = 0,
         .image = image,
-        .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
+        .viewType = view_type,
         .format = format,
         .components = .{
             .r = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -170,7 +172,7 @@ pub fn createImageView(
             .baseMipLevel = 0,
             .levelCount = 1,
             .baseArrayLayer = 0,
-            .layerCount = 1,
+            .layerCount = layer_count,
         },
     };
 
@@ -192,6 +194,7 @@ pub fn transitionLayout(
     format: vk.VkFormat,
     old_layout: vk.VkImageLayout,
     new_layout: vk.VkImageLayout,
+    layer_count: u32,
 ) void {
     _ = format; // May be used for format-specific transitions in the future
 
@@ -210,7 +213,7 @@ pub fn transitionLayout(
             .baseMipLevel = 0,
             .levelCount = 1,
             .baseArrayLayer = 0,
-            .layerCount = 1,
+            .layerCount = layer_count,
         },
     };
 
@@ -314,6 +317,105 @@ pub fn copyBufferToImage(
         1,
         &region,
     );
+}
+
+/// Create a cubemap image with 6 faces
+pub fn createCubemap(
+    context: *vk_context.VulkanContext,
+    width: u32,
+    height: u32,
+    format: vk.VkFormat,
+    usage: vk.VkImageUsageFlags,
+    image: *VulkanImage,
+) bool {
+    // Image creation info for cubemap
+    var image_info: vk.VkImageCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = null,
+        .flags = vk.VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, // CRITICAL: cubemap flag
+        .imageType = vk.VK_IMAGE_TYPE_2D, // 2D, not 3D!
+        .format = format,
+        .extent = .{
+            .width = width,
+            .height = height,
+            .depth = 1,
+        },
+        .mipLevels = 1, // No mipmaps for now
+        .arrayLayers = 6, // 6 faces
+        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+        .usage = usage,
+        .sharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = null,
+        .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    // Create image
+    var result = vk.vkCreateImage(context.device, &image_info, context.allocator, &image.handle);
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateImage failed for cubemap: {}", .{result});
+        return false;
+    }
+
+    // Allocate memory (same as regular image)
+    var mem_requirements: vk.VkMemoryRequirements = undefined;
+    vk.vkGetImageMemoryRequirements(context.device, image.handle, &mem_requirements);
+
+    const memory_type = findMemoryType(
+        context,
+        mem_requirements.memoryTypeBits,
+        vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    ) orelse {
+        logger.err("Failed to find suitable memory type for cubemap", .{});
+        vk.vkDestroyImage(context.device, image.handle, context.allocator);
+        return false;
+    };
+
+    var alloc_info: vk.VkMemoryAllocateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = null,
+        .allocationSize = mem_requirements.size,
+        .memoryTypeIndex = memory_type,
+    };
+
+    result = vk.vkAllocateMemory(context.device, &alloc_info, context.allocator, &image.memory);
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkAllocateMemory failed for cubemap: {}", .{result});
+        vk.vkDestroyImage(context.device, image.handle, context.allocator);
+        return false;
+    }
+
+    result = vk.vkBindImageMemory(context.device, image.handle, image.memory, 0);
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkBindImageMemory failed for cubemap: {}", .{result});
+        vk.vkFreeMemory(context.device, image.memory, context.allocator);
+        vk.vkDestroyImage(context.device, image.handle, context.allocator);
+        return false;
+    }
+
+    // Create cubemap view (6 layers)
+    image.view = createImageView(
+        context,
+        image.handle,
+        format,
+        vk.VK_IMAGE_ASPECT_COLOR_BIT,
+        vk.VK_IMAGE_VIEW_TYPE_CUBE, // Cubemap view type
+        6, // All 6 faces
+    );
+
+    if (image.view == null) {
+        logger.err("Failed to create cubemap image view", .{});
+        vk.vkFreeMemory(context.device, image.memory, context.allocator);
+        vk.vkDestroyImage(context.device, image.handle, context.allocator);
+        return false;
+    }
+
+    image.format = format;
+    image.width = width;
+    image.height = height;
+
+    return true;
 }
 
 // --- Private helper functions ---
