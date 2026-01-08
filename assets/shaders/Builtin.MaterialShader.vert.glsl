@@ -66,6 +66,8 @@ layout(location = 0) out vec4 frag_color;
 layout(location = 1) out vec2 frag_texcoord;
 layout(location = 2) out vec3 frag_normal;
 layout(location = 3) out vec3 frag_pos;
+layout(location = 4) out vec3 frag_tangent;
+layout(location = 5) out vec3 frag_bitangent;
 
 void main() {
     vec4 world_pos = push.model * vec4(in_position, 1.0);
@@ -75,7 +77,19 @@ void main() {
 
     // Transform normal to world space (using mat3 of model matrix since we assume uniform scaling)
     // For non-uniform scaling, we should use inverse(transpose(mat3(model)))
-    frag_normal = normalize(mat3(push.model) * in_normal);
+    mat3 model_mat3 = mat3(push.model);
+    vec3 N = normalize(model_mat3 * in_normal);
+    frag_normal = N;
+
+    // Transform tangent to world space and calculate bitangent for normal mapping
+    vec3 T = normalize(model_mat3 * in_tangent.xyz);
+    // Re-orthogonalize T with respect to N (Gram-Schmidt process)
+    T = normalize(T - dot(T, N) * N);
+    // Calculate bitangent using cross product (handedness stored in tangent.w)
+    vec3 B = cross(N, T) * in_tangent.w;
+
+    frag_tangent = T;
+    frag_bitangent = B;
 
     frag_color = in_color;
 

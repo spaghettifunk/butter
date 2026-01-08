@@ -4,3 +4,6 @@ zig-out
 .DS_Store
 
 logs.txt
+
+assets/textures
+assets/environments

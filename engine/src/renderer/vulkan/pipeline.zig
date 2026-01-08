@@ -48,6 +48,27 @@ comptime {
     }
 }
 
+/// Push constant data for shadow map rendering.
+/// Matches the material shader push constants structure for compatibility.
+/// Total size: 84 bytes
+pub const ShadowPushConstants = extern struct {
+    /// Model transformation matrix (64 bytes)
+    model: math.Mat4 = math.mat4Identity(),
+
+    /// Material parameters (16 bytes) - unused in shadow pass but needed for struct compatibility
+    material_params: math.Vec4 = .{ .elements = .{ 0.0, 0.0, 0.0, 0.0 } },
+
+    /// Cascade index (0-3) for selecting the correct view-projection matrix (4 bytes)
+    cascade_index: u32 = 0,
+};
+
+// Compile-time assertion to ensure ShadowPushConstants fits within push constant limits
+comptime {
+    if (@sizeOf(ShadowPushConstants) > 128) {
+        @compileError("ShadowPushConstants exceeds 128 bytes");
+    }
+}
+
 /// Vulkan graphics pipeline state
 pub const VulkanPipeline = struct {
     handle: vk.VkPipeline = null,
@@ -68,6 +89,18 @@ pub const MaterialShader = struct {
 
 /// Grid shader - specialized shader for editor grid rendering
 pub const GridShader = struct {
+    /// Vertex shader module
+    vertex_shader: shader.VulkanShaderModule = .{},
+
+    /// Fragment shader module
+    fragment_shader: shader.VulkanShaderModule = .{},
+
+    /// Graphics pipeline
+    pipeline: VulkanPipeline = .{},
+};
+
+/// Shadow pipeline - depth-only rendering for shadow maps
+pub const ShadowPipeline = struct {
     /// Vertex shader module
     vertex_shader: shader.VulkanShaderModule = .{},
 
@@ -140,13 +173,26 @@ pub fn createMaterialPipeline(
 }
 
 /// Create the graphics pipeline for the material shader with explicit descriptor set layouts
-/// For two-tier architecture: global_layout (Set 0) and material_layout (Set 1)
+/// For two-tier architecture: global_layout (Set 0), material_layout (Set 1), shadow_layout (Set 2)
 /// For legacy: only global_layout is used (combined UBO + textures)
 pub fn createMaterialPipelineWithLayouts(
     context: *vk_context.VulkanContext,
     material_shader: *MaterialShader,
     global_layout: vk.VkDescriptorSetLayout,
     material_layout: ?vk.VkDescriptorSetLayout,
+    renderpass: vk.VkRenderPass,
+) bool {
+    return createMaterialPipelineWithShadow(context, material_shader, global_layout, material_layout, null, renderpass);
+}
+
+/// Create the graphics pipeline for the material shader with all descriptor set layouts
+/// global_layout (Set 0), material_layout (Set 1), shadow_layout (Set 2)
+pub fn createMaterialPipelineWithShadow(
+    context: *vk_context.VulkanContext,
+    material_shader: *MaterialShader,
+    global_layout: vk.VkDescriptorSetLayout,
+    material_layout: ?vk.VkDescriptorSetLayout,
+    shadow_layout: ?vk.VkDescriptorSetLayout,
     renderpass: vk.VkRenderPass,
 ) bool {
     logger.debug("Creating material shader pipeline...", .{});
@@ -291,14 +337,19 @@ pub fn createMaterialPipelineWithLayouts(
         .size = @sizeOf(PushConstantObject),
     };
 
-    // Pipeline layout - supports both single (legacy) and dual (two-tier) descriptor sets
-    var set_layouts: [2]vk.VkDescriptorSetLayout = undefined;
+    // Pipeline layout - supports Set 0 (global UBO), Set 1 (material textures), Set 2 (shadow maps)
+    var set_layouts: [3]vk.VkDescriptorSetLayout = undefined;
     var set_layout_count: u32 = 1;
     set_layouts[0] = global_layout;
 
     if (material_layout) |mat_layout| {
         set_layouts[1] = mat_layout;
         set_layout_count = 2;
+    }
+
+    if (shadow_layout) |shd_layout| {
+        set_layouts[2] = shd_layout;
+        set_layout_count = 3;
     }
 
     var layout_info: vk.VkPipelineLayoutCreateInfo = .{
@@ -382,6 +433,304 @@ pub fn destroyMaterialPipeline(
         vk.vkDestroyPipelineLayout(context.device, layout, context.allocator);
         material_shader.pipeline.layout = null;
     }
+}
+
+/// Create the shadow pipeline (depth-only rendering for shadow maps)
+pub fn createShadowPipeline(
+    context: *vk_context.VulkanContext,
+    shadow_pipeline: *ShadowPipeline,
+    global_layout: vk.VkDescriptorSetLayout,
+    renderpass: vk.VkRenderPass,
+) bool {
+    logger.debug("Creating shadow pipeline...", .{});
+
+    // Load shadow shaders
+    if (!shader.load(
+        context,
+        std.heap.page_allocator,
+        "build/shaders/ShadowMap.vert.spv",
+        .vertex,
+        &shadow_pipeline.vertex_shader,
+    )) {
+        logger.err("Failed to create shadow vertex shader module.", .{});
+        return false;
+    }
+
+    if (!shader.load(
+        context,
+        std.heap.page_allocator,
+        "build/shaders/ShadowMap.frag.spv",
+        .fragment,
+        &shadow_pipeline.fragment_shader,
+    )) {
+        logger.err("Failed to create shadow fragment shader module.", .{});
+        shader.destroy(context, &shadow_pipeline.vertex_shader);
+        return false;
+    }
+
+    // Shader stages
+    var shader_stages: [2]vk.VkPipelineShaderStageCreateInfo = undefined;
+
+    shader_stages[0] = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = vk.VK_SHADER_STAGE_VERTEX_BIT,
+        .module = shadow_pipeline.vertex_shader.handle,
+        .pName = "main",
+        .pSpecializationInfo = null,
+    };
+
+    shader_stages[1] = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = shadow_pipeline.fragment_shader.handle,
+        .pName = "main",
+        .pSpecializationInfo = null,
+    };
+
+    // Vertex input (same as material shader - position, normal, texcoord)
+    var binding_description: vk.VkVertexInputBindingDescription = .{
+        .binding = 0,
+        .stride = @sizeOf(Vertex3D),
+        .inputRate = vk.VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+
+    var attribute_descriptions: [4]vk.VkVertexInputAttributeDescription = undefined;
+
+    // Position
+    attribute_descriptions[0] = .{
+        .location = 0,
+        .binding = 0,
+        .format = vk.VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = @offsetOf(Vertex3D, "position"),
+    };
+
+    // Normal (not used in shadow shader but included for consistency)
+    attribute_descriptions[1] = .{
+        .location = 1,
+        .binding = 0,
+        .format = vk.VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = @offsetOf(Vertex3D, "normal"),
+    };
+
+    // Texcoord (not used in shadow shader but included for consistency)
+    attribute_descriptions[2] = .{
+        .location = 2,
+        .binding = 0,
+        .format = vk.VK_FORMAT_R32G32_SFLOAT,
+        .offset = @offsetOf(Vertex3D, "texcoord"),
+    };
+
+    // Tangent (required by shader even though not used)
+    attribute_descriptions[3] = .{
+        .location = 3,
+        .binding = 0,
+        .format = vk.VK_FORMAT_R32G32B32A32_SFLOAT,
+        .offset = @offsetOf(Vertex3D, "tangent"),
+    };
+
+    var vertex_input_info: vk.VkPipelineVertexInputStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &binding_description,
+        .vertexAttributeDescriptionCount = attribute_descriptions.len,
+        .pVertexAttributeDescriptions = &attribute_descriptions,
+    };
+
+    // Input assembly
+    var input_assembly: vk.VkPipelineInputAssemblyStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .topology = vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = vk.VK_FALSE,
+    };
+
+    // Viewport and scissor (dynamic state)
+    var viewport_state: vk.VkPipelineViewportStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .viewportCount = 1,
+        .pViewports = null, // Dynamic
+        .scissorCount = 1,
+        .pScissors = null, // Dynamic
+    };
+
+    // Rasterizer (with depth bias enabled for shadow acne prevention)
+    var rasterizer: vk.VkPipelineRasterizationStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .depthClampEnable = vk.VK_FALSE, // Disabled - feature not enabled on MoltenVK
+        .rasterizerDiscardEnable = vk.VK_FALSE,
+        .polygonMode = vk.VK_POLYGON_MODE_FILL,
+        .cullMode = vk.VK_CULL_MODE_FRONT_BIT, // Front-face culling for shadows
+        .frontFace = vk.VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = vk.VK_TRUE, // Enable depth bias
+        .depthBiasConstantFactor = 0.0, // Will be set dynamically
+        .depthBiasClamp = 0.0,
+        .depthBiasSlopeFactor = 0.0, // Will be set dynamically
+        .lineWidth = 1.0,
+    };
+
+    // Multisampling (disabled)
+    var multisampling: vk.VkPipelineMultisampleStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .rasterizationSamples = vk.VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable = vk.VK_FALSE,
+        .minSampleShading = 1.0,
+        .pSampleMask = null,
+        .alphaToCoverageEnable = vk.VK_FALSE,
+        .alphaToOneEnable = vk.VK_FALSE,
+    };
+
+    // Depth and stencil (depth test and write enabled)
+    var depth_stencil: vk.VkPipelineDepthStencilStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .depthTestEnable = vk.VK_TRUE,
+        .depthWriteEnable = vk.VK_TRUE,
+        .depthCompareOp = vk.VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = vk.VK_FALSE,
+        .stencilTestEnable = vk.VK_FALSE,
+        .front = std.mem.zeroes(vk.VkStencilOpState),
+        .back = std.mem.zeroes(vk.VkStencilOpState),
+        .minDepthBounds = 0.0,
+        .maxDepthBounds = 1.0,
+    };
+
+    // No color blending (depth-only rendering)
+    var color_blending: vk.VkPipelineColorBlendStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .logicOpEnable = vk.VK_FALSE,
+        .logicOp = vk.VK_LOGIC_OP_COPY,
+        .attachmentCount = 0, // No color attachments
+        .pAttachments = null,
+        .blendConstants = .{ 0.0, 0.0, 0.0, 0.0 },
+    };
+
+    // Dynamic state (viewport, scissor, and depth bias)
+    var dynamic_states: [3]vk.VkDynamicState = .{
+        vk.VK_DYNAMIC_STATE_VIEWPORT,
+        vk.VK_DYNAMIC_STATE_SCISSOR,
+        vk.VK_DYNAMIC_STATE_DEPTH_BIAS,
+    };
+
+    var dynamic_state: vk.VkPipelineDynamicStateCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .dynamicStateCount = dynamic_states.len,
+        .pDynamicStates = &dynamic_states,
+    };
+
+    // Push constant range for model matrix and cascade index
+    var push_constant_range: vk.VkPushConstantRange = .{
+        .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = @sizeOf(ShadowPushConstants),
+    };
+
+    // Pipeline layout (only global descriptor set for shadow UBO)
+    var layout_info: vk.VkPipelineLayoutCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .setLayoutCount = 1,
+        .pSetLayouts = &global_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_constant_range,
+    };
+
+    var result = vk.vkCreatePipelineLayout(
+        context.device,
+        &layout_info,
+        context.allocator,
+        &shadow_pipeline.pipeline.layout,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreatePipelineLayout (shadow) failed with result: {}", .{result});
+        shader.destroy(context, &shadow_pipeline.vertex_shader);
+        shader.destroy(context, &shadow_pipeline.fragment_shader);
+        return false;
+    }
+
+    // Create the graphics pipeline
+    var pipeline_info: vk.VkGraphicsPipelineCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stageCount = shader_stages.len,
+        .pStages = &shader_stages,
+        .pVertexInputState = &vertex_input_info,
+        .pInputAssemblyState = &input_assembly,
+        .pTessellationState = null,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depth_stencil,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state,
+        .layout = shadow_pipeline.pipeline.layout,
+        .renderPass = renderpass,
+        .subpass = 0,
+        .basePipelineHandle = null,
+        .basePipelineIndex = -1,
+    };
+
+    result = vk.vkCreateGraphicsPipelines(
+        context.device,
+        null, // pipeline cache
+        1,
+        &pipeline_info,
+        context.allocator,
+        &shadow_pipeline.pipeline.handle,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("vkCreateGraphicsPipelines (shadow) failed with result: {}", .{result});
+        vk.vkDestroyPipelineLayout(context.device, shadow_pipeline.pipeline.layout, context.allocator);
+        shadow_pipeline.pipeline.layout = null;
+        shader.destroy(context, &shadow_pipeline.vertex_shader);
+        shader.destroy(context, &shadow_pipeline.fragment_shader);
+        return false;
+    }
+
+    logger.info("Shadow pipeline created.", .{});
+    return true;
+}
+
+/// Destroy the shadow pipeline
+pub fn destroyShadowPipeline(
+    context: *vk_context.VulkanContext,
+    shadow_pipeline: *ShadowPipeline,
+) void {
+    if (context.device == null) return;
+
+    if (shadow_pipeline.pipeline.handle) |handle| {
+        vk.vkDestroyPipeline(context.device, handle, context.allocator);
+        shadow_pipeline.pipeline.handle = null;
+    }
+
+    if (shadow_pipeline.pipeline.layout) |layout| {
+        vk.vkDestroyPipelineLayout(context.device, layout, context.allocator);
+        shadow_pipeline.pipeline.layout = null;
+    }
+
+    shader.destroy(context, &shadow_pipeline.vertex_shader);
+    shader.destroy(context, &shadow_pipeline.fragment_shader);
 }
 
 /// Bind the object shader pipeline for rendering

@@ -129,8 +129,23 @@ const MaterialEntry = struct {
 pub const MaterialConfig = struct {
     name: [resource_types.MATERIAL_NAME_MAX_LENGTH]u8,
     auto_release: bool,
-    diffuse_colour: math_types.Vec4,
-    diffuse_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8,
+
+    // PBR material properties
+    base_color: math_types.Vec4 = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+    roughness: f32 = 0.8,
+    metallic: f32 = 0.0,
+    emissive_strength: f32 = 0.0,
+
+    // PBR texture map names
+    albedo_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    metallic_roughness_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    normal_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    ao_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+    emissive_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
+
+    // Legacy support (for backward compatibility)
+    diffuse_colour: math_types.Vec4 = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+    diffuse_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
     specular_map_name: [resource_types.TEXTURE_NAME_MAX_LENGTH]u8 = [_]u8{0} ** resource_types.TEXTURE_NAME_MAX_LENGTH,
     specular_color: [3]f32 = .{ 1.0, 1.0, 1.0 },
     shininess: f32 = 32.0,
@@ -166,6 +181,33 @@ pub const MaterialSystem = struct {
                     .generation = 0,
                     .internal_id = 0,
                     .name = [_]u8{0} ** resource_types.MATERIAL_NAME_MAX_LENGTH,
+                    // PBR properties
+                    .base_color = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
+                    .roughness = 0.8,
+                    .metallic = 0.0,
+                    .emissive_strength = 0.0,
+                    // PBR texture maps
+                    .albedo_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .metallic_roughness_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .normal_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .ao_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    .emissive_map = .{
+                        .texture = undefined,
+                        .use = .TEXTURE_USE_UNKNOWN,
+                    },
+                    // Legacy support
                     .diffuse_colour = .{ .elements = .{ 1.0, 1.0, 1.0, 1.0 } },
                     .diffuse_map = .{
                         .texture = undefined,
@@ -277,25 +319,27 @@ pub const MaterialSystem = struct {
         const idx = material_id - 1;
         var entry = &self.materials[idx];
 
-        // Load the diffuse texture
+        // Load the albedo/diffuse texture (try albedo_map first, fallback to diffuse_map for legacy)
+        const albedo_map_name = std.mem.sliceTo(&config.albedo_map_name, 0);
         const diffuse_map_name = std.mem.sliceTo(&config.diffuse_map_name, 0);
+        const texture_path = if (albedo_map_name.len > 0) albedo_map_name else diffuse_map_name;
         var tex_id: u32 = texture.INVALID_TEXTURE_ID;
         var tex_ptr: ?*resource_types.Texture = null;
 
-        if (diffuse_map_name.len > 0) {
-            logger.info("Loading texture for material '{s}': '{s}'", .{ name_slice, diffuse_map_name });
+        if (texture_path.len > 0) {
+            logger.info("Loading texture for material '{s}': '{s}'", .{ name_slice, texture_path });
             // Check if file exists
-            if (filesystem.exists(diffuse_map_name)) {
-                logger.info("Texture file exists: '{s}'", .{diffuse_map_name});
+            if (filesystem.exists(texture_path)) {
+                logger.info("Texture file exists: '{s}'", .{texture_path});
             } else {
-                logger.warn("Texture file NOT found: '{s}'", .{diffuse_map_name});
+                logger.warn("Texture file NOT found: '{s}'", .{texture_path});
             }
-            tex_id = texture.loadFromFile(diffuse_map_name);
+            tex_id = texture.loadFromFile(texture_path);
             if (tex_id != texture.INVALID_TEXTURE_ID) {
                 tex_ptr = texture.getTexture(tex_id);
                 logger.info("Texture loaded successfully with ID: {d}", .{tex_id});
             } else {
-                logger.warn("Failed to load texture: '{s}'", .{diffuse_map_name});
+                logger.warn("Failed to load texture: '{s}'", .{texture_path});
             }
         }
 
@@ -313,24 +357,108 @@ pub const MaterialSystem = struct {
             return null;
         }
 
-        // Load the specular texture
+        // Load the metallic-roughness texture (try metallic_roughness first, fallback to specular for legacy)
+        const metallic_roughness_map_name = std.mem.sliceTo(&config.metallic_roughness_map_name, 0);
         const specular_map_name = std.mem.sliceTo(&config.specular_map_name, 0);
+        const mr_texture_path = if (metallic_roughness_map_name.len > 0) metallic_roughness_map_name else specular_map_name;
         var specular_tex_ptr: ?*resource_types.Texture = null;
 
-        if (specular_map_name.len > 0) {
-            logger.info("Loading specular texture for material '{s}': '{s}'", .{ name_slice, specular_map_name });
-            const specular_tex_id = texture.loadFromFile(specular_map_name);
-            if (specular_tex_id != texture.INVALID_TEXTURE_ID) {
-                specular_tex_ptr = texture.getTexture(specular_tex_id);
-                logger.info("Specular texture loaded successfully with ID: {d}", .{specular_tex_id});
+        if (mr_texture_path.len > 0) {
+            logger.info("Loading metallic-roughness texture for material '{s}': '{s}'", .{ name_slice, mr_texture_path });
+            const mr_tex_id = texture.loadFromFile(mr_texture_path);
+            if (mr_tex_id != texture.INVALID_TEXTURE_ID) {
+                specular_tex_ptr = texture.getTexture(mr_tex_id);
+                logger.info("Metallic-roughness texture loaded successfully with ID: {d}", .{mr_tex_id});
             } else {
-                logger.warn("Failed to load specular texture: '{s}'", .{specular_map_name});
+                logger.warn("Failed to load metallic-roughness texture: '{s}'", .{mr_texture_path});
             }
         }
 
-        // If specular texture loading failed, use default white texture
+        // If metallic-roughness texture loading failed, use default white texture
         if (specular_tex_ptr == null) {
             specular_tex_ptr = texture.getDefaultTexture();
+        }
+
+        // Load remaining PBR textures (normal, AO, emissive)
+        const tex_sys = texture.getSystem() orelse {
+            logger.err("Texture system not available for material '{s}'", .{name_slice});
+            return null;
+        };
+
+        // Load normal map
+        const normal_map_name = std.mem.sliceTo(&config.normal_map_name, 0);
+        var normal_tex_ptr = if (normal_map_name.len > 0) blk: {
+            const normal_tex_id = texture.loadFromFile(normal_map_name);
+            if (normal_tex_id != texture.INVALID_TEXTURE_ID) {
+                logger.info("Normal map loaded: '{s}' (id={})", .{ normal_map_name, normal_tex_id });
+                break :blk texture.getTexture(normal_tex_id);
+            } else {
+                logger.warn("Failed to load normal map: '{s}'", .{normal_map_name});
+                break :blk null;
+            }
+        } else null;
+        if (normal_tex_ptr == null) {
+            normal_tex_ptr = self.getOrCreateDefaultNormalMap(tex_sys);
+        }
+
+        // Load AO map
+        const ao_map_name = std.mem.sliceTo(&config.ao_map_name, 0);
+        var ao_tex_ptr = if (ao_map_name.len > 0) blk: {
+            const ao_tex_id = texture.loadFromFile(ao_map_name);
+            if (ao_tex_id != texture.INVALID_TEXTURE_ID) {
+                logger.info("AO map loaded: '{s}' (id={})", .{ ao_map_name, ao_tex_id });
+                break :blk texture.getTexture(ao_tex_id);
+            } else {
+                logger.warn("Failed to load AO map: '{s}'", .{ao_map_name});
+                break :blk null;
+            }
+        } else null;
+        if (ao_tex_ptr == null) {
+            ao_tex_ptr = self.getOrCreateDefaultWhiteMap(tex_sys);
+        }
+
+        // Load emissive map
+        const emissive_map_name = std.mem.sliceTo(&config.emissive_map_name, 0);
+        var emissive_tex_ptr = if (emissive_map_name.len > 0) blk: {
+            const emissive_tex_id = texture.loadFromFile(emissive_map_name);
+            if (emissive_tex_id != texture.INVALID_TEXTURE_ID) {
+                logger.info("Emissive map loaded: '{s}' (id={})", .{ emissive_map_name, emissive_tex_id });
+                break :blk texture.getTexture(emissive_tex_id);
+            } else {
+                logger.warn("Failed to load emissive map: '{s}'", .{emissive_map_name});
+                break :blk null;
+            }
+        } else null;
+        if (emissive_tex_ptr == null) {
+            emissive_tex_ptr = self.getOrCreateDefaultBlackMap(tex_sys);
+        }
+
+        // Get IBL textures from environment system
+        const env_system = context.get().environment;
+        const ibl_textures = if (env_system) |env| env.getIBLTextures() else null;
+
+        // Use default texture as fallback for IBL
+        const default_fallback = texture.getDefaultTexture() orelse {
+            logger.err("Failed to get default texture for IBL fallback", .{});
+            return null;
+        };
+
+        var irradiance_tex_ptr = default_fallback;
+        var prefiltered_tex_ptr = default_fallback;
+        var brdf_lut_tex_ptr = default_fallback;
+
+        if (ibl_textures) |ibl| {
+            if (texture.getTexture(ibl.irradiance_map_id)) |tex| {
+                irradiance_tex_ptr = tex;
+            }
+            if (texture.getTexture(ibl.prefiltered_map_id)) |tex| {
+                prefiltered_tex_ptr = tex;
+            }
+            if (texture.getTexture(ibl.brdf_lut_id)) |tex| {
+                brdf_lut_tex_ptr = tex;
+            }
+        } else {
+            logger.warn("Environment system not available - using default textures for IBL", .{});
         }
 
         // Populate the material
@@ -345,16 +473,37 @@ pub const MaterialSystem = struct {
         entry.material.specular_color = config.specular_color;
         entry.material.shininess = config.shininess;
 
-        // Allocate material descriptor set (two-tier descriptor architecture)
+        // Populate PBR material maps
+        entry.material.albedo_map.texture = tex_ptr.?;
+        entry.material.albedo_map.use = .TEXTURE_USE_MAP_ALBEDO;
+        entry.material.metallic_roughness_map.texture = specular_tex_ptr.?;
+        entry.material.metallic_roughness_map.use = .TEXTURE_USE_MAP_METALLIC_ROUGHNESS;
+        entry.material.normal_map.texture = normal_tex_ptr.?;
+        entry.material.normal_map.use = .TEXTURE_USE_MAP_NORMAL;
+        entry.material.ao_map.texture = ao_tex_ptr.?;
+        entry.material.ao_map.use = .TEXTURE_USE_MAP_AO;
+        entry.material.emissive_map.texture = emissive_tex_ptr.?;
+        entry.material.emissive_map.use = .TEXTURE_USE_MAP_EMISSIVE;
+
+        // Allocate material descriptor set with all 8 PBR textures (two-tier descriptor architecture)
         if (renderer.getSystem()) |render_sys| {
             entry.material.descriptor_set = switch (render_sys.backend) {
                 .vulkan => |*v| blk: {
-                    if (v.allocateMaterialDescriptorSet(tex_ptr.?, specular_tex_ptr.?)) |ds| {
+                    if (v.allocateMaterialDescriptorSetPBR(
+                        tex_ptr.?, // albedo
+                        specular_tex_ptr.?, // metallic_roughness
+                        normal_tex_ptr.?, // normal
+                        ao_tex_ptr.?, // ao
+                        emissive_tex_ptr.?, // emissive
+                        irradiance_tex_ptr, // irradiance (IBL)
+                        prefiltered_tex_ptr, // prefiltered (IBL)
+                        brdf_lut_tex_ptr, // brdf_lut (IBL)
+                    )) |ds| {
                         break :blk @ptrFromInt(@intFromPtr(ds));
                     }
                     break :blk null;
                 },
-                .metal => |*m| m.allocateMaterialDescriptorSet(tex_ptr.?, specular_tex_ptr.?),
+                .metal => |*m| m.allocateMaterialDescriptorSet(tex_ptr.?, specular_tex_ptr.?), // Metal backend still uses legacy for now
                 else => null,
             };
             if (entry.material.descriptor_set == null) {
@@ -554,17 +703,46 @@ pub const MaterialSystem = struct {
             if (std.mem.eql(u8, key_trimmed, "name")) {
                 const copy_len = @min(value_trimmed.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
                 @memcpy(config.name[0..copy_len], value_trimmed[0..copy_len]);
-            } else if (std.mem.eql(u8, key_trimmed, "diffuse_colour")) {
-                // Parse "r,g,b,a" format
+            }
+            // PBR material properties
+            else if (std.mem.eql(u8, key_trimmed, "base_color")) {
+                config.base_color = parseVec4(value_trimmed);
+            } else if (std.mem.eql(u8, key_trimmed, "roughness")) {
+                config.roughness = std.fmt.parseFloat(f32, value_trimmed) catch 0.8;
+            } else if (std.mem.eql(u8, key_trimmed, "metallic")) {
+                config.metallic = std.fmt.parseFloat(f32, value_trimmed) catch 0.0;
+            } else if (std.mem.eql(u8, key_trimmed, "emissive_strength")) {
+                config.emissive_strength = std.fmt.parseFloat(f32, value_trimmed) catch 0.0;
+            }
+            // PBR texture maps
+            else if (std.mem.eql(u8, key_trimmed, "albedo_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.albedo_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "metallic_roughness_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.metallic_roughness_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "normal_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.normal_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "ao_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.ao_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "emissive_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.emissive_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            }
+            // Legacy support
+            else if (std.mem.eql(u8, key_trimmed, "diffuse_colour")) {
                 config.diffuse_colour = parseVec4(value_trimmed);
+                config.base_color = config.diffuse_colour; // Also set base_color
             } else if (std.mem.eql(u8, key_trimmed, "diffuse_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.diffuse_map_name[0..copy_len], value_trimmed[0..copy_len]);
+                @memcpy(config.albedo_map_name[0..copy_len], value_trimmed[0..copy_len]); // Also set albedo_map
             } else if (std.mem.eql(u8, key_trimmed, "specular_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.specular_map_name[0..copy_len], value_trimmed[0..copy_len]);
             } else if (std.mem.eql(u8, key_trimmed, "specular_color")) {
-                // Parse "r,g,b" format
                 config.specular_color = parseVec3(value_trimmed);
             } else if (std.mem.eql(u8, key_trimmed, "shininess")) {
                 config.shininess = std.fmt.parseFloat(f32, value_trimmed) catch 32.0;
@@ -729,12 +907,38 @@ pub const MaterialSystem = struct {
             if (std.mem.eql(u8, key_trimmed, "name")) {
                 const copy_len = @min(value_trimmed.len, resource_types.MATERIAL_NAME_MAX_LENGTH - 1);
                 @memcpy(config.name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "base_color")) {
+                const color = parseVec4(value_trimmed);
+                config.base_color = .{ .elements = color };
             } else if (std.mem.eql(u8, key_trimmed, "diffuse_colour")) {
                 const color = parseVec3(value_trimmed);
                 config.diffuse_colour = .{ .elements = .{ color[0], color[1], color[2], 1.0 } };
+            } else if (std.mem.eql(u8, key_trimmed, "albedo_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.albedo_map_name[0..copy_len], value_trimmed[0..copy_len]);
+                // Also copy to diffuse_map for backward compatibility
+                @memcpy(config.diffuse_map_name[0..copy_len], value_trimmed[0..copy_len]);
             } else if (std.mem.eql(u8, key_trimmed, "diffuse_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.diffuse_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "metallic_roughness_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.metallic_roughness_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "normal_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.normal_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "ao_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.ao_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "emissive_map")) {
+                const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
+                @memcpy(config.emissive_map_name[0..copy_len], value_trimmed[0..copy_len]);
+            } else if (std.mem.eql(u8, key_trimmed, "roughness")) {
+                config.roughness = std.fmt.parseFloat(f32, value_trimmed) catch 0.8;
+            } else if (std.mem.eql(u8, key_trimmed, "metallic")) {
+                config.metallic = std.fmt.parseFloat(f32, value_trimmed) catch 0.0;
+            } else if (std.mem.eql(u8, key_trimmed, "emissive_strength")) {
+                config.emissive_strength = std.fmt.parseFloat(f32, value_trimmed) catch 0.0;
             } else if (std.mem.eql(u8, key_trimmed, "specular_map")) {
                 const copy_len = @min(value_trimmed.len, resource_types.TEXTURE_NAME_MAX_LENGTH - 1);
                 @memcpy(config.specular_map_name[0..copy_len], value_trimmed[0..copy_len]);
@@ -804,6 +1008,38 @@ pub const MaterialSystem = struct {
         if (args.callback) |cb| {
             cb(mat);
         }
+    }
+
+    // ========== Default Texture Helpers ==========
+
+    /// Get or create a default normal map (flat normal: 128, 128, 255 = 0, 0, 1 in tangent space)
+    fn getOrCreateDefaultNormalMap(self: *MaterialSystem, tex_sys: *texture.TextureSystem) *resource_types.Texture {
+        _ = self;
+        // Check if we already have a cached default normal map
+        // For now, just create it each time - TODO: cache this
+        var pixels: [4]u8 = .{ 128, 128, 255, 255 }; // RGB = (0, 0, 1) mapped to (128, 128, 255)
+        const tex_id = tex_sys.createFromPixels(1, 1, 4, false, &pixels);
+        return tex_sys.getTexture(tex_id) orelse tex_sys.getDefaultTexture().?;
+    }
+
+    /// Get or create a default white map (for AO, metallic-roughness defaults)
+    fn getOrCreateDefaultWhiteMap(self: *MaterialSystem, tex_sys: *texture.TextureSystem) *resource_types.Texture {
+        _ = self;
+        // Check if we already have a cached default white map
+        // For now, just create it each time - TODO: cache this
+        var pixels: [4]u8 = .{ 255, 255, 255, 255 };
+        const tex_id = tex_sys.createFromPixels(1, 1, 4, false, &pixels);
+        return tex_sys.getTexture(tex_id) orelse tex_sys.getDefaultTexture().?;
+    }
+
+    /// Get or create a default black map (for emissive default)
+    fn getOrCreateDefaultBlackMap(self: *MaterialSystem, tex_sys: *texture.TextureSystem) *resource_types.Texture {
+        _ = self;
+        // Check if we already have a cached default black map
+        // For now, just create it each time - TODO: cache this
+        var pixels: [4]u8 = .{ 0, 0, 0, 255 };
+        const tex_id = tex_sys.createFromPixels(1, 1, 4, false, &pixels);
+        return tex_sys.getTexture(tex_id) orelse tex_sys.getDefaultTexture().?;
     }
 };
 

@@ -249,7 +249,8 @@ fn compileShaders(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !v
                 const msl_out = try std.fs.path.join(gpa, &[_][]const u8{ shaders_out, b.fmt("{s}.msl", .{base_name}) });
                 defer gpa.free(msl_out);
 
-                const spirv_cmd = &[_][]const u8{ "spirv-cross", spv_out, "--msl", "--output", msl_out };
+                // Use MSL 2.0 (version 20000) to support texture arrays
+                const spirv_cmd = &[_][]const u8{ "spirv-cross", spv_out, "--msl", "--msl-version", "20000", "--output", msl_out };
 
                 var child_spirv = std.process.Child.init(spirv_cmd, gpa);
                 child_spirv.stdin_behavior = .Ignore;

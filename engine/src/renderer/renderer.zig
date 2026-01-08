@@ -86,6 +86,38 @@ pub const GlobalUBO = extern struct {
     }
 };
 
+/// Shadow uniform buffer object containing shadow mapping data.
+/// This is Set 0, Binding 1 in shaders (GlobalUBO is Set 0, Binding 0).
+/// Layout matches std140 for GLSL/MSL compatibility.
+/// Total size: 320 bytes (256 matrices + 16 splits + 48 params)
+pub const ShadowUBO = extern struct {
+    // Cascade view-projection matrices (4 cascades * 64 bytes = 256 bytes)
+    cascade_view_proj: [4]math_types.Mat4,
+
+    // Cascade split distances in view space (16 bytes, vec4 aligned)
+    cascade_splits: [4]f32,
+
+    // Shadow parameters (16 bytes)
+    shadow_bias: f32 = 0.005,
+    slope_bias: f32 = 0.01,
+    pcf_samples: f32 = 16.0, // float for shader compatibility
+    directional_shadow_enabled: f32 = 1.0, // 1.0 = enabled, 0.0 = disabled
+
+    // Point light shadow enable flags (16 bytes)
+    point_shadow_enabled: [4]f32 = [_]f32{0.0} ** 4, // One per point light
+
+    // Point light shadow indices (16 bytes) - maps point light index to shadow map index
+    point_shadow_indices: [4]f32 = [_]f32{0.0} ** 4,
+
+    /// Create a default ShadowUBO with identity matrices
+    pub fn init() ShadowUBO {
+        return ShadowUBO{
+            .cascade_view_proj = [_]math_types.Mat4{math.mat4Identity()} ** 4,
+            .cascade_splits = [_]f32{0.0} ** 4,
+        };
+    }
+};
+
 /// Grid shader uniform buffer object
 /// Matches the GLSL layout in Builtin.GridShader.frag.glsl (set=0, binding=1)
 /// Using explicit floats instead of vec3 to ensure consistent memory layout
@@ -391,6 +423,13 @@ pub const RendererSystem = struct {
         // Use page allocator for now as we don't have a specific one passed in
         instance.light_system = light.LightSystem.init(std.heap.page_allocator);
 
+        // Initialize environment system (must be initialized after texture system but before materials)
+        const environment = @import("../systems/environment.zig");
+        _ = environment.initialize(std.heap.page_allocator) catch |err| {
+            logger.err("Failed to initialize environment system: {}", .{err});
+            // Continue without environment - materials will use default textures
+        };
+
         // Register with the shared context
         context.get().renderer = &instance;
         logger.info("Renderer system initialized.", .{});
@@ -405,6 +444,11 @@ pub const RendererSystem = struct {
             }
             sys.backend.shutdown();
         }
+
+        // Shutdown environment system
+        const environment = @import("../systems/environment.zig");
+        environment.shutdown();
+
         context.get().renderer = null;
         logger.info("Renderer system shutdown.", .{});
     }

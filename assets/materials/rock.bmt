@@ -1,0 +1,9 @@
+name=rock
+base_color=1.0,1.0,1.0,1.0
+albedo_map=../assets/textures/metal/diffusion.jpg
+metallic_roughness_map=../assets/textures/metal/roughness.png
+normal_map=../assets/textures/metal/normal.png
+ao_map=../assets/textures/metal/color.png
+roughness=1.0
+metallic=0.0
+emissive_strength=0.0

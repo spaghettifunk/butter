@@ -10,6 +10,8 @@ const command_buffer = @import("command_buffer.zig");
 const pipeline = @import("pipeline.zig");
 const buffer = @import("buffer.zig");
 const descriptor = @import("descriptor.zig");
+const texture = @import("texture.zig");
+const image = @import("image.zig");
 const resource_types = @import("../../resources/types.zig");
 
 // Pure Vulkan import - no GLFW dependency (safe for game library)
@@ -152,6 +154,27 @@ pub const VulkanContext = struct {
 
     // Default material descriptor set (uses default texture for both diffuse and specular)
     default_material_descriptor_set: vk.VkDescriptorSet = null,
+
+    // Shadow mapping resources
+    shadow_renderpass: renderpass.VulkanRenderpass = .{},
+    shadow_descriptor_state: descriptor.ShadowDescriptorState = .{},
+    shadow_pipeline: pipeline.ShadowPipeline = .{},
+
+    // Shadow UBO buffers (one per frame in flight)
+    shadow_uniform_buffers: [swapchain.MAX_SWAPCHAIN_IMAGES]buffer.VulkanBuffer =
+        [_]buffer.VulkanBuffer{.{}} ** swapchain.MAX_SWAPCHAIN_IMAGES,
+
+    // Cascade shadow map resources (4 cascades)
+    cascade_shadow_images: [4]image.VulkanImage = [_]image.VulkanImage{.{}} ** 4,
+    cascade_shadow_views: [4]vk.VkImageView = [_]vk.VkImageView{null} ** 4,
+    cascade_shadow_framebuffers: [4]vk.VkFramebuffer = [_]vk.VkFramebuffer{null} ** 4,
+
+    // Shadow sampler (depth comparison sampler)
+    shadow_sampler: vk.VkSampler = null,
+
+    // Default cubemap for point shadows (placeholder until point shadows are implemented)
+    default_cubemap_image: image.VulkanImage = .{},
+    default_cubemap_view: vk.VkImageView = null,
 };
 
 /// Vulkan debug callback - called by validation layers
