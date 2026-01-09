@@ -10,6 +10,7 @@ const material = @import("../systems/material.zig");
 const mesh_asset = @import("../systems/mesh_asset.zig");
 const jobs = @import("../systems/jobs.zig");
 const resource_manager = @import("../resources/manager.zig");
+const environment = @import("../systems/environment.zig");
 
 const clock = @import("clock.zig");
 
@@ -214,6 +215,12 @@ fn createInternal(gameInstance: *Game, editorMode: bool) bool {
         logger.err("Failed to initialize texture system.", .{});
         return false;
     }
+
+    // Initialize environment system (after texture system is available)
+    _ = environment.initialize(std.heap.page_allocator) catch |err| {
+        logger.err("Failed to initialize environment system: {}", .{err});
+        // Continue without environment - materials will use default textures
+    };
 
     // Initialize material system (after texture system is available)
     if (!material.MaterialSystem.initialize()) {

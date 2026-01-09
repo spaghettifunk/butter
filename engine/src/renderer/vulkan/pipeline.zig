@@ -448,7 +448,7 @@ pub fn createShadowPipeline(
     if (!shader.load(
         context,
         std.heap.page_allocator,
-        "build/shaders/ShadowMap.vert.spv",
+        "build/shaders/Builtin.ShadowMap.vert.spv",
         .vertex,
         &shadow_pipeline.vertex_shader,
     )) {
@@ -459,7 +459,7 @@ pub fn createShadowPipeline(
     if (!shader.load(
         context,
         std.heap.page_allocator,
-        "build/shaders/ShadowMap.frag.spv",
+        "build/shaders/Builtin.ShadowMap.frag.spv",
         .fragment,
         &shadow_pipeline.fragment_shader,
     )) {

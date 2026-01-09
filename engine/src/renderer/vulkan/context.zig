@@ -160,6 +160,11 @@ pub const VulkanContext = struct {
     shadow_descriptor_state: descriptor.ShadowDescriptorState = .{},
     shadow_pipeline: pipeline.ShadowPipeline = .{},
 
+    // Skybox rendering
+    skybox_descriptor_state: descriptor.SkyboxDescriptorState = .{},
+    skybox_pipeline: pipeline.VulkanPipeline = .{},
+    skybox_enabled: bool = false,
+
     // Shadow UBO buffers (one per frame in flight)
     shadow_uniform_buffers: [swapchain.MAX_SWAPCHAIN_IMAGES]buffer.VulkanBuffer =
         [_]buffer.VulkanBuffer{.{}} ** swapchain.MAX_SWAPCHAIN_IMAGES,

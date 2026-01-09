@@ -52,6 +52,9 @@ pub const EnvironmentSystem = struct {
     /// Whether the system has been initialized
     initialized: bool = false,
 
+    /// Skybox cubemap texture ID
+    skybox_cubemap_id: u32 = texture_system.INVALID_TEXTURE_ID,
+
     /// Initialize the environment system with default procedural environment
     pub fn init(allocator: std.mem.Allocator) !*EnvironmentSystem {
         const self = try allocator.create(EnvironmentSystem);
@@ -95,6 +98,11 @@ pub const EnvironmentSystem = struct {
         tex_sys.release(self.ibl_textures.prefiltered_map_id);
         tex_sys.release(self.ibl_textures.brdf_lut_id);
 
+        // Release skybox if loaded
+        if (self.skybox_cubemap_id != texture_system.INVALID_TEXTURE_ID) {
+            tex_sys.release(self.skybox_cubemap_id);
+        }
+
         context.get().environment = null;
         instance = null;
         self.initialized = false;
@@ -125,6 +133,57 @@ pub const EnvironmentSystem = struct {
     /// Get IBL intensity
     pub fn getIntensity(self: *EnvironmentSystem) f32 {
         return self.config.intensity;
+    }
+
+    /// Load skybox from 6 separate image files
+    /// Face order: right (+X), left (-X), top (+Y), bottom (-Y), front (+Z), back (-Z)
+    pub fn loadSkyboxCubemap(self: *EnvironmentSystem, face_paths: [6][]const u8) bool {
+        const tex_sys = texture_system.getSystem() orelse {
+            logger.err("Texture system not available", .{});
+            return false;
+        };
+
+        // Load cubemap
+        const cubemap_id = tex_sys.loadCubemapFromFiles(face_paths);
+        if (cubemap_id == texture_system.INVALID_TEXTURE_ID) {
+            logger.err("Failed to load skybox cubemap", .{});
+            return false;
+        }
+
+        // Release old skybox if any
+        if (self.skybox_cubemap_id != texture_system.INVALID_TEXTURE_ID) {
+            tex_sys.release(self.skybox_cubemap_id);
+        }
+
+        self.skybox_cubemap_id = cubemap_id;
+
+        // Update renderer
+        const render_sys = renderer.getSystem() orelse {
+            logger.err("Renderer not available", .{});
+            return false;
+        };
+
+        const cubemap_texture = tex_sys.getTexture(cubemap_id) orelse {
+            logger.err("Failed to get cubemap texture", .{});
+            return false;
+        };
+
+        render_sys.setSkyboxCubemap(cubemap_texture);
+
+        logger.info("Skybox cubemap loaded successfully", .{});
+        return true;
+    }
+
+    /// Get skybox cubemap texture ID
+    pub fn getSkyboxCubemapId(self: *EnvironmentSystem) u32 {
+        return self.skybox_cubemap_id;
+    }
+
+    /// Disable skybox rendering
+    pub fn disableSkybox(self: *EnvironmentSystem) void {
+        _ = self;
+        const render_sys = renderer.getSystem() orelse return;
+        render_sys.disableSkybox();
     }
 
     // ========== Private Implementation ==========

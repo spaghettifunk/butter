@@ -114,6 +114,26 @@ fn initializeTestScene(state: *GameState) void {
         return;
     };
 
+    // Load skybox cubemap
+    if (ctx.get().environment) |environment| {
+        const skybox_faces = [6][]const u8{
+            "../assets/skybox/daylight/right.jpg", // +X (right)
+            "../assets/skybox/daylight/left.jpg", // -X (left)
+            "../assets/skybox/daylight/top.jpg", // +Y (top)
+            "../assets/skybox/daylight/bottom.jpg", // -Y (bottom)
+            "../assets/skybox/daylight/front.jpg", // +Z (front)
+            "../assets/skybox/daylight/back.jpg", // -Z (back)
+        };
+
+        if (environment.loadSkyboxCubemap(skybox_faces)) {
+            engine.logger.info("✅ Skybox loaded successfully!", .{});
+        } else {
+            engine.logger.warn("Failed to load skybox cubemap", .{});
+        }
+    } else {
+        engine.logger.warn("Environment system not available for skybox loading", .{});
+    }
+
     // Load materials using Resource Manager (NEW API)
     const cobblestone_handle = resource_mgr.loadMaterial("cobblestone") catch |err| {
         engine.logger.warn("Failed to load cobblestone material through ResourceManager: {}", .{err});
@@ -128,7 +148,7 @@ fn initializeTestScene(state: *GameState) void {
     engine.logger.info("Loaded colorful material through ResourceManager with ID: {d}", .{colorful_handle.id});
 
     // Load rock PBR material for testing
-    const rock_handle = resource_mgr.loadMaterial("rock") catch |err| {
+    const rock_handle = resource_mgr.loadMaterial("paving") catch |err| {
         engine.logger.warn("Failed to load rock material through ResourceManager: {}", .{err});
         return;
     };

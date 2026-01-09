@@ -143,6 +143,187 @@ pub fn createWithFilter(
     return true;
 }
 
+/// Create a cubemap texture from 6 face images
+/// Face order: +X (right), -X (left), +Y (top), -Y (bottom), +Z (front), -Z (back)
+pub fn createCubemap(
+    context: *vk_context.VulkanContext,
+    texture: *resource_types.Texture,
+    width: u32,
+    height: u32,
+    channel_count: u8,
+    face_pixels: [6][]const u8,
+) bool {
+    const command_buffer_module = @import("command_buffer.zig");
+
+    // Validate all faces are same size
+    const expected_size = width * height * @as(usize, channel_count);
+    for (face_pixels) |face| {
+        if (face.len != expected_size) {
+            logger.err("Cubemap face size mismatch: expected {}, got {}", .{ expected_size, face.len });
+            return false;
+        }
+    }
+
+    // Select format based on channel count (same as 2D textures)
+    const format: vk.VkFormat = switch (channel_count) {
+        1 => vk.VK_FORMAT_R8_UNORM,
+        2 => vk.VK_FORMAT_R8G8_UNORM,
+        3 => vk.VK_FORMAT_R8G8B8_SRGB,
+        4 => vk.VK_FORMAT_R8G8B8A8_SRGB,
+        else => {
+            logger.err("Unsupported channel count for cubemap: {}", .{channel_count});
+            return false;
+        },
+    };
+
+    // Allocate internal data
+    const internal_data = std.heap.page_allocator.create(VulkanTexture) catch {
+        logger.err("Failed to allocate cubemap internal data", .{});
+        return false;
+    };
+    internal_data.* = .{};
+
+    // Create staging buffer for all 6 faces
+    const total_size = expected_size * 6;
+    var staging_buffer: vulkan_buffer.VulkanBuffer = undefined;
+    if (!vulkan_buffer.create(
+        context,
+        &staging_buffer,
+        total_size,
+        vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    )) {
+        logger.err("Failed to create staging buffer for cubemap", .{});
+        std.heap.page_allocator.destroy(internal_data);
+        return false;
+    }
+
+    // Copy all 6 faces to staging buffer
+    var data_ptr: ?*anyopaque = null;
+    _ = vk.vkMapMemory(context.device, staging_buffer.memory, 0, total_size, 0, &data_ptr);
+    if (data_ptr) |ptr| {
+        const dest_slice = @as([*]u8, @ptrCast(ptr))[0..total_size];
+        for (face_pixels, 0..) |face, i| {
+            const offset = i * expected_size;
+            @memcpy(dest_slice[offset .. offset + expected_size], face);
+        }
+        vk.vkUnmapMemory(context.device, staging_buffer.memory);
+    } else {
+        logger.err("Failed to map staging buffer memory for cubemap", .{});
+        vulkan_buffer.destroy(context, &staging_buffer);
+        std.heap.page_allocator.destroy(internal_data);
+        return false;
+    }
+
+    // Create cubemap image
+    if (!vulkan_image.createCubemap(
+        context,
+        width,
+        height,
+        format,
+        vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT | vk.VK_IMAGE_USAGE_SAMPLED_BIT,
+        &internal_data.image,
+    )) {
+        logger.err("Failed to create cubemap image", .{});
+        vulkan_buffer.destroy(context, &staging_buffer);
+        std.heap.page_allocator.destroy(internal_data);
+        return false;
+    }
+
+    // Begin single-use command buffer for upload
+    var cmd_buffer: command_buffer_module.VulkanCommandBuffer = undefined;
+    if (!command_buffer_module.allocateAndBeginSingleUse(context, context.graphics_command_pool, &cmd_buffer)) {
+        logger.err("Failed to begin command buffer for cubemap upload", .{});
+        vulkan_image.destroy(context, &internal_data.image);
+        vulkan_buffer.destroy(context, &staging_buffer);
+        std.heap.page_allocator.destroy(internal_data);
+        return false;
+    }
+
+    // Transition layout: UNDEFINED → TRANSFER_DST (all 6 layers)
+    vulkan_image.transitionLayout(
+        context,
+        cmd_buffer.handle,
+        internal_data.image.handle,
+        format,
+        vk.VK_IMAGE_LAYOUT_UNDEFINED,
+        vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        6, // All 6 faces
+    );
+
+    // Copy staging buffer to each cubemap face
+    for (0..6) |face_idx| {
+        var copy_region: vk.VkBufferImageCopy = .{
+            .bufferOffset = face_idx * expected_size,
+            .bufferRowLength = 0, // Tightly packed
+            .bufferImageHeight = 0,
+            .imageSubresource = .{
+                .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = @intCast(face_idx),
+                .layerCount = 1,
+            },
+            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
+            .imageExtent = .{
+                .width = width,
+                .height = height,
+                .depth = 1,
+            },
+        };
+
+        vk.vkCmdCopyBufferToImage(
+            cmd_buffer.handle,
+            staging_buffer.handle,
+            internal_data.image.handle,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &copy_region,
+        );
+    }
+
+    // Transition layout: TRANSFER_DST → SHADER_READ_ONLY (all 6 layers)
+    vulkan_image.transitionLayout(
+        context,
+        cmd_buffer.handle,
+        internal_data.image.handle,
+        format,
+        vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        6, // All 6 faces
+    );
+
+    // End and submit command buffer
+    if (!command_buffer_module.endSingleUse(context, context.graphics_command_pool, &cmd_buffer, context.graphics_queue)) {
+        logger.err("Failed to submit cubemap upload commands", .{});
+        vulkan_image.destroy(context, &internal_data.image);
+        vulkan_buffer.destroy(context, &staging_buffer);
+        std.heap.page_allocator.destroy(internal_data);
+        return false;
+    }
+
+    // Destroy staging buffer (no longer needed)
+    vulkan_buffer.destroy(context, &staging_buffer);
+
+    // Create sampler (same as 2D texture)
+    if (!createSampler(context, &internal_data.sampler, .linear)) {
+        logger.err("Failed to create sampler for cubemap", .{});
+        vulkan_image.destroy(context, &internal_data.image);
+        std.heap.page_allocator.destroy(internal_data);
+        return false;
+    }
+
+    // Store in texture resource
+    texture.width = width;
+    texture.height = height;
+    texture.channel_count = channel_count;
+    texture.has_transparency = channel_count == 4;
+    texture.internal_data = internal_data;
+    texture.generation += 1;
+
+    logger.info("Cubemap texture created: {}x{}, {} channels", .{ width, height, channel_count });
+    return true;
+}
+
 /// Destroy a texture and free all associated resources
 pub fn destroy(context: *vk_context.VulkanContext, texture: *resource_types.Texture) void {
     if (context.device == null) return;
@@ -226,6 +407,7 @@ fn copyDataToImage(
         format,
         vk.VK_IMAGE_LAYOUT_UNDEFINED,
         vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
     );
 
     // Copy buffer to image
@@ -245,6 +427,7 @@ fn copyDataToImage(
         format,
         vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        1,
     );
 
     // End recording
@@ -325,4 +508,9 @@ fn createSampler(context: *vk_context.VulkanContext, sampler: *vk.VkSampler, fil
     }
 
     return true;
+}
+
+/// Get internal Vulkan texture data (for descriptor updates)
+pub fn getTextureData(texture: *resource_types.Texture) *VulkanTexture {
+    return @ptrCast(@alignCast(texture.internal_data.?));
 }

@@ -68,6 +68,19 @@ pub const ShadowDescriptorState = struct {
         [_]vk.VkDescriptorSet{null} ** MAX_DESCRIPTOR_SETS,
 };
 
+/// Skybox descriptor state (Set 3 - skybox cubemap)
+pub const SkyboxDescriptorState = struct {
+    /// Descriptor set layout for skybox cubemap
+    layout: vk.VkDescriptorSetLayout = null,
+
+    /// Descriptor pool
+    pool: vk.VkDescriptorPool = null,
+
+    /// Descriptor sets (one per frame in flight)
+    sets: [MAX_DESCRIPTOR_SETS]vk.VkDescriptorSet =
+        [_]vk.VkDescriptorSet{null} ** MAX_DESCRIPTOR_SETS,
+};
+
 /// Create the global descriptor set layout (Set 0: GlobalUBO + ShadowUBO)
 /// This is the new two-tier architecture where textures are in Set 1
 pub fn createGlobalLayout(
@@ -1177,3 +1190,146 @@ pub fn updatePointShadowDescriptorSet(
 
     vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
 }
+
+
+// ========== Skybox Descriptor Functions ==========
+
+/// Create skybox descriptor set layout (Set 3: single cubemap sampler)
+pub fn createSkyboxLayout(
+    context: *vk_context.VulkanContext,
+    state: *SkyboxDescriptorState,
+) bool {
+    // Set 3, Binding 0: Skybox cubemap
+    var layout_binding: vk.VkDescriptorSetLayoutBinding = .{
+        .binding = 0,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+        .pImmutableSamplers = null,
+    };
+
+    var layout_info: vk.VkDescriptorSetLayoutCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .bindingCount = 1,
+        .pBindings = &layout_binding,
+    };
+
+    const result = vk.vkCreateDescriptorSetLayout(
+        context.device,
+        &layout_info,
+        context.allocator,
+        &state.layout,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("Failed to create skybox descriptor set layout: {}", .{result});
+        return false;
+    }
+
+    return true;
+}
+
+/// Create skybox descriptor pool and allocate sets
+pub fn createSkyboxPool(
+    context: *vk_context.VulkanContext,
+    state: *SkyboxDescriptorState,
+) bool {
+    // Pool size: 1 sampler per frame
+    var pool_size: vk.VkDescriptorPoolSize = .{
+        .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = MAX_DESCRIPTOR_SETS,
+    };
+
+    var pool_info: vk.VkDescriptorPoolCreateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .maxSets = MAX_DESCRIPTOR_SETS,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+    };
+
+    var result = vk.vkCreateDescriptorPool(
+        context.device,
+        &pool_info,
+        context.allocator,
+        &state.pool,
+    );
+
+    if (result != vk.VK_SUCCESS) {
+        logger.err("Failed to create skybox descriptor pool: {}", .{result});
+        return false;
+    }
+
+    // Allocate descriptor sets (one per frame)
+    var layouts: [MAX_DESCRIPTOR_SETS]vk.VkDescriptorSetLayout = undefined;
+    for (&layouts) |*layout| {
+        layout.* = state.layout;
+    }
+
+    var alloc_info: vk.VkDescriptorSetAllocateInfo = .{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = null,
+        .descriptorPool = state.pool,
+        .descriptorSetCount = MAX_DESCRIPTOR_SETS,
+        .pSetLayouts = &layouts,
+    };
+
+    result = vk.vkAllocateDescriptorSets(context.device, &alloc_info, &state.sets);
+    if (result != vk.VK_SUCCESS) {
+        logger.err("Failed to allocate skybox descriptor sets: {}", .{result});
+        return false;
+    }
+
+    return true;
+}
+
+/// Update skybox descriptor set with cubemap texture
+pub fn updateSkyboxSet(
+    context: *vk_context.VulkanContext,
+    state: *SkyboxDescriptorState,
+    frame_index: u32,
+    cubemap_texture: *resource_types.Texture,
+) void {
+    const texture_data = vulkan_texture.getTextureData(cubemap_texture);
+
+    var image_info: vk.VkDescriptorImageInfo = .{
+        .sampler = texture_data.sampler,
+        .imageView = texture_data.image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+
+    var write: vk.VkWriteDescriptorSet = .{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .pNext = null,
+        .dstSet = state.sets[frame_index],
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &image_info,
+        .pBufferInfo = null,
+        .pTexelBufferView = null,
+    };
+
+    vk.vkUpdateDescriptorSets(context.device, 1, &write, 0, null);
+}
+
+/// Destroy skybox descriptor resources
+pub fn destroySkyboxState(
+    context: *vk_context.VulkanContext,
+    state: *SkyboxDescriptorState,
+) void {
+    if (state.pool != null) {
+        vk.vkDestroyDescriptorPool(context.device, state.pool, context.allocator);
+        state.pool = null;
+    }
+
+    if (state.layout != null) {
+        vk.vkDestroyDescriptorSetLayout(context.device, state.layout, context.allocator);
+        state.layout = null;
+    }
+}
+
