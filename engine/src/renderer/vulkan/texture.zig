@@ -165,7 +165,7 @@ pub fn createCubemap(
     }
 
     // Select format based on channel count (same as 2D textures)
-    const format = switch (channel_count) {
+    const format: vk.VkFormat = switch (channel_count) {
         1 => vk.VK_FORMAT_R8_UNORM,
         2 => vk.VK_FORMAT_R8G8_UNORM,
         3 => vk.VK_FORMAT_R8G8B8_SRGB,
@@ -188,10 +188,10 @@ pub fn createCubemap(
     var staging_buffer: vulkan_buffer.VulkanBuffer = undefined;
     if (!vulkan_buffer.create(
         context,
+        &staging_buffer,
         total_size,
         vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        &staging_buffer,
     )) {
         logger.err("Failed to create staging buffer for cubemap", .{});
         std.heap.page_allocator.destroy(internal_data);
@@ -293,7 +293,7 @@ pub fn createCubemap(
     );
 
     // End and submit command buffer
-    if (!command_buffer_module.endSingleUse(context, context.graphics_command_pool, context.graphics_queue, &cmd_buffer)) {
+    if (!command_buffer_module.endSingleUse(context, context.graphics_command_pool, &cmd_buffer, context.graphics_queue)) {
         logger.err("Failed to submit cubemap upload commands", .{});
         vulkan_image.destroy(context, &internal_data.image);
         vulkan_buffer.destroy(context, &staging_buffer);

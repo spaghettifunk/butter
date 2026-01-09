@@ -240,6 +240,27 @@ pub const Backend = union(BackendType) {
         };
     }
 
+    pub fn createTextureCubemap(
+        self: *Backend,
+        texture: *resource_types.Texture,
+        width: u32,
+        height: u32,
+        channel_count: u8,
+        face_pixels: [6][]const u8,
+    ) bool {
+        return switch (self.*) {
+            .vulkan => |*v| v.createTextureCubemap(texture, width, height, channel_count, face_pixels),
+            .metal => {
+                logger.err("createTextureCubemap not implemented for Metal backend", .{});
+                return false;
+            },
+            else => {
+                logger.err("createTextureCubemap not implemented for this backend", .{});
+                return false;
+            },
+        };
+    }
+
     pub fn destroyTexture(self: *Backend, texture: *resource_types.Texture) void {
         switch (self.*) {
             .vulkan => |*v| v.destroyTexture(texture),
@@ -423,13 +444,6 @@ pub const RendererSystem = struct {
         // Use page allocator for now as we don't have a specific one passed in
         instance.light_system = light.LightSystem.init(std.heap.page_allocator);
 
-        // Initialize environment system (must be initialized after texture system but before materials)
-        const environment = @import("../systems/environment.zig");
-        _ = environment.initialize(std.heap.page_allocator) catch |err| {
-            logger.err("Failed to initialize environment system: {}", .{err});
-            // Continue without environment - materials will use default textures
-        };
-
         // Register with the shared context
         context.get().renderer = &instance;
         logger.info("Renderer system initialized.", .{});
@@ -586,6 +600,36 @@ pub const RendererSystem = struct {
         pixels: []const u8,
     ) bool {
         return self.backend.createTexture(texture, width, height, channel_count, has_transparency, pixels);
+    }
+
+    /// Create a cubemap texture from 6 face images
+    pub fn createTextureCubemap(
+        self: *RendererSystem,
+        texture: *resource_types.Texture,
+        width: u32,
+        height: u32,
+        channel_count: u8,
+        face_pixels: [6][]const u8,
+    ) bool {
+        return self.backend.createTextureCubemap(texture, width, height, channel_count, face_pixels);
+    }
+
+    /// Set the skybox cubemap texture and enable skybox rendering
+    pub fn setSkyboxCubemap(self: *RendererSystem, cubemap_texture: *resource_types.Texture) void {
+        switch (self.backend) {
+            .vulkan => |*v| v.setSkyboxCubemap(cubemap_texture),
+            .metal => {},
+            .directx => {},
+        }
+    }
+
+    /// Disable skybox rendering
+    pub fn disableSkybox(self: *RendererSystem) void {
+        switch (self.backend) {
+            .vulkan => |*v| v.disableSkybox(),
+            .metal => {},
+            .directx => {},
+        }
     }
 
     /// Destroy a texture and free all associated resources

@@ -293,6 +293,156 @@ pub const TextureSystem = struct {
         return texture_id;
     }
 
+    /// Load a cubemap from 6 separate image files
+    /// Face order: +X (right), -X (left), +Y (top), -Y (bottom), +Z (front), -Z (back)
+    pub fn loadCubemapFromFiles(self: *TextureSystem, face_paths: [6][]const u8) u32 {
+        // Build cache key from all 6 paths
+        var cache_key_buffer: [1024]u8 = undefined;
+        var cache_key_stream = std.io.fixedBufferStream(&cache_key_buffer);
+        const writer = cache_key_stream.writer();
+        for (face_paths) |path| {
+            writer.writeAll(path) catch break;
+            writer.writeByte('|') catch break;
+        }
+        const cache_key = cache_key_stream.getWritten();
+
+        // Check cache first
+        if (self.path_lookup.get(cache_key)) |existing_id| {
+            const idx = existing_id - 1;
+            self.textures[idx].ref_count += 1;
+            logger.debug("Cubemap cache hit: (id={}, ref_count={})", .{ existing_id, self.textures[idx].ref_count });
+            return existing_id;
+        }
+
+        // Load all 6 faces
+        var face_pixels: [6][]u8 = undefined;
+        var width: u32 = 0;
+        var height: u32 = 0;
+        var channels: u8 = 0;
+
+        for (face_paths, 0..) |path, i| {
+            // Open file
+            var file_handle: filesystem.FileHandle = .{};
+            if (!filesystem.open(path, .{ .read = true }, &file_handle)) {
+                logger.err("Failed to open cubemap face {}: {s}", .{ i, path });
+                // Free already loaded faces
+                for (0..i) |j| {
+                    stbImage.stbi_image_free(face_pixels[j].ptr);
+                }
+                return INVALID_TEXTURE_ID;
+            }
+            defer filesystem.close(&file_handle);
+
+            // Read file data
+            const file_data = filesystem.readAllBytes(&file_handle, std.heap.page_allocator) orelse {
+                logger.err("Failed to read cubemap face {}: {s}", .{ i, path });
+                for (0..i) |j| {
+                    stbImage.stbi_image_free(face_pixels[j].ptr);
+                }
+                return INVALID_TEXTURE_ID;
+            };
+            defer std.heap.page_allocator.free(file_data);
+
+            // Decode image
+            stbImage.stbi_set_flip_vertically_on_load(0); // Don't flip cubemap faces
+
+            var w: c_int = 0;
+            var h: c_int = 0;
+            var ch: c_int = 0;
+
+            const pixels = stbImage.stbi_load_from_memory(
+                file_data.ptr,
+                @intCast(file_data.len),
+                &w,
+                &h,
+                &ch,
+                4, // Force RGBA
+            );
+
+            if (pixels == null) {
+                const failure_reason = stbImage.stbi_failure_reason();
+                if (failure_reason != null) {
+                    logger.err("Failed to decode cubemap face {}: {s} - {s}", .{ i, path, failure_reason });
+                } else {
+                    logger.err("Failed to decode cubemap face {}: {s}", .{ i, path });
+                }
+                for (0..i) |j| {
+                    stbImage.stbi_image_free(face_pixels[j].ptr);
+                }
+                return INVALID_TEXTURE_ID;
+            }
+
+            // First face sets dimensions
+            if (i == 0) {
+                width = @intCast(w);
+                height = @intCast(h);
+                channels = 4;
+            } else {
+                // Validate all faces match
+                if (w != width or h != height) {
+                    logger.err("Cubemap face {} dimensions mismatch: {}x{} vs {}x{}", .{ i, w, h, width, height });
+                    for (0..i) |j| {
+                        stbImage.stbi_image_free(face_pixels[j].ptr);
+                    }
+                    stbImage.stbi_image_free(pixels);
+                    return INVALID_TEXTURE_ID;
+                }
+            }
+
+            const pixel_count: usize = @as(usize, width) * @as(usize, height) * @as(usize, channels);
+            face_pixels[i] = pixels[0..pixel_count];
+        }
+        defer for (face_pixels) |face| {
+            stbImage.stbi_image_free(face.ptr);
+        };
+
+        // Allocate texture ID
+        const texture_id = self.allocateId() orelse {
+            logger.err("No free texture slots for cubemap", .{});
+            return INVALID_TEXTURE_ID;
+        };
+
+        const idx = texture_id - 1;
+        var entry = &self.textures[idx];
+
+        // Get renderer and create cubemap
+        const render_sys = renderer.getSystem() orelse {
+            logger.err("Renderer not available for cubemap creation", .{});
+            return INVALID_TEXTURE_ID;
+        };
+
+        if (!render_sys.createTextureCubemap(
+            &entry.texture,
+            width,
+            height,
+            channels,
+            face_pixels,
+        )) {
+            logger.err("Failed to create GPU cubemap texture", .{});
+            return INVALID_TEXTURE_ID;
+        }
+
+        entry.texture.id = texture_id;
+        entry.ref_count = 1;
+        entry.is_valid = true;
+
+        // Cache the cubemap
+        const cache_key_copy = std.heap.page_allocator.dupe(u8, cache_key) catch {
+            logger.warn("Failed to allocate cache key for cubemap", .{});
+            return texture_id; // Still valid, just not cached
+        };
+
+        entry.path = cache_key_copy;
+        self.path_lookup.put(cache_key_copy, texture_id) catch {
+            logger.warn("Failed to add cubemap to cache", .{});
+            std.heap.page_allocator.free(cache_key_copy);
+            entry.path = null;
+        };
+
+        logger.info("Cubemap texture loaded: id={}, {}x{}", .{ texture_id, width, height });
+        return texture_id;
+    }
+
     /// Get a texture by ID. Returns null if invalid.
     pub fn getTexture(self: *TextureSystem, id: u32) ?*resource_types.Texture {
         if (id == INVALID_TEXTURE_ID) return null;

@@ -294,6 +294,17 @@ pub const VulkanBackend = struct {
             return false;
         }
 
+        // Initialize skybox descriptor layout and pool
+        if (!descriptor.createSkyboxLayout(&self.context, &self.context.skybox_descriptor_state)) {
+            logger.err("Failed to create skybox descriptor layout", .{});
+            return false;
+        }
+
+        if (!descriptor.createSkyboxPool(&self.context, &self.context.skybox_descriptor_state)) {
+            logger.err("Failed to create skybox descriptor pool", .{});
+            return false;
+        }
+
         // Update descriptor sets with uniform buffer bindings
         self.updateDescriptorSets();
 
@@ -324,6 +335,18 @@ pub const VulkanBackend = struct {
             self.context.shadow_renderpass.handle,
         )) {
             logger.err("Failed to create shadow pipeline.", .{});
+            return false;
+        }
+
+        // Create skybox pipeline
+        // Only include the descriptor sets actually used by the skybox shaders
+        const skybox_layouts = [_]vk.VkDescriptorSetLayout{
+            self.context.global_descriptor_state.global_layout, // Set 0: Global UBO
+            self.context.skybox_descriptor_state.layout, // Set 1: Skybox cubemap
+        };
+
+        if (!self.createSkyboxPipeline(&skybox_layouts)) {
+            logger.err("Failed to create skybox pipeline", .{});
             return false;
         }
 
@@ -364,6 +387,15 @@ pub const VulkanBackend = struct {
 
         // Destroy shadow pipeline
         pipeline.destroyShadowPipeline(&self.context, &self.context.shadow_pipeline);
+
+        // Destroy skybox resources
+        if (self.context.skybox_pipeline.handle != null) {
+            vk.vkDestroyPipeline(self.context.device, self.context.skybox_pipeline.handle, self.context.allocator);
+        }
+        if (self.context.skybox_pipeline.layout != null) {
+            vk.vkDestroyPipelineLayout(self.context.device, self.context.skybox_pipeline.layout, self.context.allocator);
+        }
+        descriptor.destroySkyboxState(&self.context, &self.context.skybox_descriptor_state);
 
         // Destroy graphics pipeline
         pipeline.destroyMaterialPipeline(&self.context, &self.context.material_shader);
@@ -559,6 +591,11 @@ pub const VulkanBackend = struct {
         };
         vk.vkCmdSetScissor(cmd_buffer.handle, 0, 1, &scissor);
 
+        // Render skybox if enabled (render first, so geometry draws on top)
+        if (self.context.skybox_enabled) {
+            self.renderSkybox(cmd_buffer.handle, image_index);
+        }
+
         // Mark frame as in progress (for texture binding safety)
         self.context.frame_in_progress = true;
 
@@ -713,9 +750,12 @@ pub const VulkanBackend = struct {
             // Orthographic projection for cascade
             const half_size = cascade_size * 0.5;
             const light_proj = math.mat4Ortho(
-                -half_size, half_size,  // left, right
-                -half_size, half_size,  // bottom, top
-                -cascade_size, cascade_size, // near, far
+                -half_size,
+                half_size, // left, right
+                -half_size,
+                half_size, // bottom, top
+                -cascade_size,
+                cascade_size, // near, far
             );
 
             // Combine view and projection
@@ -888,6 +928,25 @@ pub const VulkanBackend = struct {
             channel_count,
             has_transparency,
             pixels,
+        );
+    }
+
+    /// Create a cubemap texture from 6 face images
+    pub fn createTextureCubemap(
+        self: *VulkanBackend,
+        tex: *resource_types.Texture,
+        width: u32,
+        height: u32,
+        channel_count: u8,
+        face_pixels: [6][]const u8,
+    ) bool {
+        return texture.createCubemap(
+            &self.context,
+            tex,
+            width,
+            height,
+            channel_count,
+            face_pixels,
         );
     }
 
@@ -2563,6 +2622,290 @@ pub const VulkanBackend = struct {
 
         // Draw indexed
         vk.vkCmdDrawIndexed(cmd, self.context.grid_geometry_index_count, 1, 0, 0, 0);
+    }
+
+    // --- Skybox rendering ---
+
+    fn createSkyboxPipeline(self: *VulkanBackend, descriptor_layouts: []const vk.VkDescriptorSetLayout) bool {
+        const allocator = std.heap.page_allocator;
+
+        logger.debug("Creating skybox pipeline...", .{});
+
+        // Load skybox vertex shader
+        var vert_shader_module: shader.VulkanShaderModule = .{};
+        if (!shader.load(
+            &self.context,
+            allocator,
+            "build/shaders/Builtin.Skybox.vert.spv",
+            .vertex,
+            &vert_shader_module,
+        )) {
+            logger.err("Failed to load skybox vertex shader", .{});
+            return false;
+        }
+        defer shader.destroy(&self.context, &vert_shader_module);
+
+        // Load skybox fragment shader
+        var frag_shader_module: shader.VulkanShaderModule = .{};
+        if (!shader.load(
+            &self.context,
+            allocator,
+            "build/shaders/Builtin.Skybox.frag.spv",
+            .fragment,
+            &frag_shader_module,
+        )) {
+            logger.err("Failed to load skybox fragment shader", .{});
+            return false;
+        }
+        defer shader.destroy(&self.context, &frag_shader_module);
+
+        // Shader stages
+        var shader_stages: [2]vk.VkPipelineShaderStageCreateInfo = .{
+            shader.createStageInfo(.{
+                .module = vert_shader_module.handle,
+                .stage = .vertex,
+            }),
+            shader.createStageInfo(.{
+                .module = frag_shader_module.handle,
+                .stage = .fragment,
+            }),
+        };
+
+        // No vertex input (fullscreen triangle generated in shader)
+        var vertex_input_info: vk.VkPipelineVertexInputStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .vertexBindingDescriptionCount = 0,
+            .pVertexBindingDescriptions = null,
+            .vertexAttributeDescriptionCount = 0,
+            .pVertexAttributeDescriptions = null,
+        };
+
+        // Input assembly
+        var input_assembly: vk.VkPipelineInputAssemblyStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .topology = vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = vk.VK_FALSE,
+        };
+
+        // Viewport state (dynamic)
+        var viewport_state: vk.VkPipelineViewportStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .viewportCount = 1,
+            .pViewports = null,
+            .scissorCount = 1,
+            .pScissors = null,
+        };
+
+        // Rasterizer (no culling for skybox)
+        var rasterizer: vk.VkPipelineRasterizationStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .depthClampEnable = vk.VK_FALSE,
+            .rasterizerDiscardEnable = vk.VK_FALSE,
+            .polygonMode = vk.VK_POLYGON_MODE_FILL,
+            .cullMode = vk.VK_CULL_MODE_NONE, // No culling for skybox
+            .frontFace = vk.VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable = vk.VK_FALSE,
+            .depthBiasConstantFactor = 0.0,
+            .depthBiasClamp = 0.0,
+            .depthBiasSlopeFactor = 0.0,
+            .lineWidth = 1.0,
+        };
+
+        // Multisampling
+        var multisampling: vk.VkPipelineMultisampleStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .rasterizationSamples = vk.VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable = vk.VK_FALSE,
+            .minSampleShading = 1.0,
+            .pSampleMask = null,
+            .alphaToCoverageEnable = vk.VK_FALSE,
+            .alphaToOneEnable = vk.VK_FALSE,
+        };
+
+        // Depth stencil (test enabled, write disabled, LESS_OR_EQUAL for far plane)
+        var depth_stencil: vk.VkPipelineDepthStencilStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .depthTestEnable = vk.VK_TRUE,
+            .depthWriteEnable = vk.VK_FALSE, // Don't write depth for skybox
+            .depthCompareOp = vk.VK_COMPARE_OP_LESS_OR_EQUAL, // Draw at far plane
+            .depthBoundsTestEnable = vk.VK_FALSE,
+            .stencilTestEnable = vk.VK_FALSE,
+            .front = std.mem.zeroes(vk.VkStencilOpState),
+            .back = std.mem.zeroes(vk.VkStencilOpState),
+            .minDepthBounds = 0.0,
+            .maxDepthBounds = 1.0,
+        };
+
+        // Color blending (no blending needed for skybox)
+        var color_blend_attachment: vk.VkPipelineColorBlendAttachmentState = .{
+            .blendEnable = vk.VK_FALSE,
+            .srcColorBlendFactor = vk.VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = vk.VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = vk.VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = vk.VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = vk.VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = vk.VK_BLEND_OP_ADD,
+            .colorWriteMask = vk.VK_COLOR_COMPONENT_R_BIT |
+                vk.VK_COLOR_COMPONENT_G_BIT |
+                vk.VK_COLOR_COMPONENT_B_BIT |
+                vk.VK_COLOR_COMPONENT_A_BIT,
+        };
+
+        var color_blending: vk.VkPipelineColorBlendStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .logicOpEnable = vk.VK_FALSE,
+            .logicOp = vk.VK_LOGIC_OP_COPY,
+            .attachmentCount = 1,
+            .pAttachments = &color_blend_attachment,
+            .blendConstants = .{ 0.0, 0.0, 0.0, 0.0 },
+        };
+
+        // Dynamic state
+        var dynamic_states = [_]vk.VkDynamicState{
+            vk.VK_DYNAMIC_STATE_VIEWPORT,
+            vk.VK_DYNAMIC_STATE_SCISSOR,
+        };
+
+        var dynamic_state: vk.VkPipelineDynamicStateCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .dynamicStateCount = dynamic_states.len,
+            .pDynamicStates = &dynamic_states,
+        };
+
+        // Pipeline layout with 2 descriptor sets (Set 0: Global UBO, Set 3: Skybox cubemap)
+        var pipeline_layout_info: vk.VkPipelineLayoutCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .setLayoutCount = @intCast(descriptor_layouts.len),
+            .pSetLayouts = descriptor_layouts.ptr,
+            .pushConstantRangeCount = 0,
+            .pPushConstantRanges = null,
+        };
+
+        var result = vk.vkCreatePipelineLayout(
+            self.context.device,
+            &pipeline_layout_info,
+            self.context.allocator,
+            &self.context.skybox_pipeline.layout,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkCreatePipelineLayout (skybox) failed: {}", .{result});
+            return false;
+        }
+
+        // Create graphics pipeline
+        var pipeline_info: vk.VkGraphicsPipelineCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .stageCount = shader_stages.len,
+            .pStages = &shader_stages,
+            .pVertexInputState = &vertex_input_info,
+            .pInputAssemblyState = &input_assembly,
+            .pTessellationState = null,
+            .pViewportState = &viewport_state,
+            .pRasterizationState = &rasterizer,
+            .pMultisampleState = &multisampling,
+            .pDepthStencilState = &depth_stencil,
+            .pColorBlendState = &color_blending,
+            .pDynamicState = &dynamic_state,
+            .layout = self.context.skybox_pipeline.layout,
+            .renderPass = self.context.main_renderpass.handle,
+            .subpass = 0,
+            .basePipelineHandle = null,
+            .basePipelineIndex = -1,
+        };
+
+        result = vk.vkCreateGraphicsPipelines(
+            self.context.device,
+            null,
+            1,
+            &pipeline_info,
+            self.context.allocator,
+            &self.context.skybox_pipeline.handle,
+        );
+
+        if (result != vk.VK_SUCCESS) {
+            logger.err("vkCreateGraphicsPipelines (skybox) failed: {}", .{result});
+            vk.vkDestroyPipelineLayout(self.context.device, self.context.skybox_pipeline.layout, self.context.allocator);
+            self.context.skybox_pipeline.layout = null;
+            return false;
+        }
+
+        logger.info("Skybox pipeline created.", .{});
+        return true;
+    }
+
+    fn renderSkybox(self: *VulkanBackend, cmd_buffer: vk.VkCommandBuffer, image_index: u32) void {
+        const current_frame = self.context.current_frame;
+
+        // Bind skybox pipeline
+        pipeline.bindPipeline(cmd_buffer, &self.context.skybox_pipeline);
+
+        // Bind descriptor sets
+        // Set 0: Global UBO (camera matrices)
+        vk.vkCmdBindDescriptorSets(
+            cmd_buffer,
+            vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            self.context.skybox_pipeline.layout,
+            0, // First set
+            1,
+            &self.context.global_descriptor_state.global_sets[current_frame],
+            0,
+            null,
+        );
+
+        // Set 1: Skybox cubemap
+        vk.vkCmdBindDescriptorSets(
+            cmd_buffer,
+            vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            self.context.skybox_pipeline.layout,
+            1, // Set 1 (skybox cubemap)
+            1,
+            &self.context.skybox_descriptor_state.sets[image_index],
+            0,
+            null,
+        );
+
+        // Draw fullscreen triangle (3 vertices, no vertex buffer)
+        vk.vkCmdDraw(cmd_buffer, 3, 1, 0, 0);
+    }
+
+    pub fn setSkyboxCubemap(self: *VulkanBackend, cubemap_texture: *resource_types.Texture) void {
+        // Update all frame descriptor sets
+        for (0..swapchain.MAX_SWAPCHAIN_IMAGES) |i| {
+            descriptor.updateSkyboxSet(
+                &self.context,
+                &self.context.skybox_descriptor_state,
+                @intCast(i),
+                cubemap_texture,
+            );
+        }
+
+        self.context.skybox_enabled = true;
+        logger.info("Skybox cubemap set and enabled", .{});
+    }
+
+    pub fn disableSkybox(self: *VulkanBackend) void {
+        self.context.skybox_enabled = false;
     }
 };
 
